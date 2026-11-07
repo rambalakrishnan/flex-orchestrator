@@ -12,6 +12,8 @@
  *   standard-tier fallback.
  * - Continuity and cache fields come from the shared helpers in
  *   `src/lib/continuity.ts`; this module never re-implements that rule.
+ * - Turn indices are strictly 1-based integers; request builders reject
+ *   anything else with a `RangeError`.
  * - Flex capacity allows at most five sends per attempt with persisted
  *   exponential backoff; ambiguous dispatches pause for a fresh attempt/key.
  */
@@ -35,11 +37,24 @@ import type {
 } from "../types.ts";
 import { cachePayload, reasoningContinuityPayload } from "./continuity.ts";
 
-/** Canonical completion marker grammar mirrored from `src/lib/tag.ts`. */
-export const COMPLETION_MARKER_FORMAT = `<TURN_COMPLETE turn="{turnIndex}" />`;
+/** Canonical terminal completion marker for a given turn index. */
+export const COMPLETION_MARKER_FORMAT = "<!-- TURN_END:{turnIndex} -->";
 
-/** Canonical continuation marker grammar mirrored from `src/lib/tag.ts`. */
-export const CONTINUATION_MARKER_FORMAT = `<TURN_CONTINUE turn="{turnIndex}" />`;
+/** Canonical continuation marker for a given turn index. */
+export const CONTINUATION_MARKER_FORMAT = "<!-- TURN_CONTINUE:{turnIndex} -->";
+
+/**
+ * Rejects any turn index that is not an integer `>= 1`.
+ *
+ * Turn indices are strictly 1-based across storage, requests, and markers.
+ */
+function assertPositiveTurnIndex(turnIndex: TurnIndex, operation: string): void {
+  if (!Number.isInteger(turnIndex) || turnIndex < 1) {
+    throw new RangeError(
+      `${operation} requires a 1-based integer turn index; received ${String(turnIndex)}.`,
+    );
+  }
+}
 
 /**
  * Developer instruction placed inside `input` (never the deprecated
@@ -104,6 +119,8 @@ export type GenerationInputItem = Readonly<Record<string, unknown>>;
 export function buildGenerationInput(
   params: BuildGenerationInputParams,
 ): readonly GenerationInputItem[] {
+  assertPositiveTurnIndex(params.turnIndex, "buildGenerationInput");
+
   const items: GenerationInputItem[] = [
     {
       type: "message",
@@ -195,6 +212,8 @@ export function buildGenerationIdempotencyKey(params: {
 export function buildCanonicalGenerationRequest(
   params: CanonicalGenerationRequestParams,
 ): CanonicalGenerationRequest {
+  assertPositiveTurnIndex(params.turnIndex, "buildCanonicalGenerationRequest");
+
   const anchor: ContinuityAnchor | null =
     params.previousResponseId === null
       ? null

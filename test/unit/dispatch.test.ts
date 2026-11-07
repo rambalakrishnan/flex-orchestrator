@@ -9,9 +9,12 @@ import {
   MAX_FLEX_CAPACITY_SENDS_PER_ATTEMPT,
 } from "../../src/constants.ts";
 import {
+  COMPLETION_MARKER_FORMAT,
+  CONTINUATION_MARKER_FORMAT,
   applyRetryAfter,
   buildCanonicalGenerationRequest,
   buildGenerationIdempotencyKey,
+  buildGenerationInput,
   classifyDispatchResult,
   computeCapacityBackoffMs,
   type DispatchDecision,
@@ -116,8 +119,11 @@ describe("canonical generation request body (§7)", () => {
     expect(developer.role).toBe("developer");
     const developerText = firstContentItem(developer, "developer").text;
     expect(typeof developerText).toBe("string");
-    expect(developerText).toContain(`<TURN_COMPLETE turn="${BASE_TURN_INDEX}" />`);
-    expect(developerText).toContain(`<TURN_CONTINUE turn="${BASE_TURN_INDEX}" />`);
+    expect(developerText).toContain(`<!-- TURN_END:${BASE_TURN_INDEX} -->`);
+    expect(developerText).toContain(`<!-- TURN_CONTINUE:${BASE_TURN_INDEX} -->`);
+    expect(developerText).not.toContain("<TURN_COMPLETE");
+    expect(developerText).not.toContain("<TURN_CONTINUE");
+    expect(developerText).not.toContain("[[TURN_");
 
     expect(requestBodyOf(baseGenerationRequestParams()).request.inputItems).toEqual(
       input,
@@ -219,8 +225,10 @@ describe("canonical generation request body (§7)", () => {
     expect(text).toContain(
       `Continue turn ${BASE_TURN_INDEX} from exactly where the previous continuation stopped.`,
     );
-    expect(text).toContain(`<TURN_COMPLETE turn="${BASE_TURN_INDEX}" />`);
-    expect(text).toContain(`<TURN_CONTINUE turn="${BASE_TURN_INDEX}" />`);
+    expect(text).toContain(`<!-- TURN_END:${BASE_TURN_INDEX} -->`);
+    expect(text).toContain(`<!-- TURN_CONTINUE:${BASE_TURN_INDEX} -->`);
+    expect(text).not.toContain("<TURN_COMPLETE");
+    expect(text).not.toContain("<TURN_CONTINUE");
     expect(text).not.toContain(BASE_PROMPT_TEXT);
     expect(body.previous_response_id).toBe(ANCHOR_RESPONSE_ID);
     expect(body.background).toBe(true);
@@ -268,6 +276,84 @@ describe("canonical generation request body (§7)", () => {
       expect(lowered).not.toContain("bearer ");
       expect(lowered).not.toContain("api_key");
       expect(lowered).not.toContain("api-key");
+    }
+  });
+});
+
+describe("canonical marker dialect", () => {
+  it("exports comment-style markers with a {turnIndex} placeholder", () => {
+    expect(COMPLETION_MARKER_FORMAT).toBe("<!-- TURN_END:{turnIndex} -->");
+    expect(CONTINUATION_MARKER_FORMAT).toBe("<!-- TURN_CONTINUE:{turnIndex} -->");
+    expect(COMPLETION_MARKER_FORMAT.replace("{turnIndex}", "3")).toBe("<!-- TURN_END:3 -->");
+    expect(CONTINUATION_MARKER_FORMAT.replace("{turnIndex}", "3")).toBe(
+      "<!-- TURN_CONTINUE:3 -->",
+    );
+  });
+
+  it("never emits angle-bracket or bracket marker forms", () => {
+    const { body } = requestBodyOf(continuationGenerationRequestParams());
+    const serialized = JSON.stringify(body);
+
+    expect(serialized).not.toContain("<TURN_COMPLETE");
+    expect(serialized).not.toContain("<TURN_CONTINUE");
+    expect(serialized).not.toContain("[[TURN_");
+  });
+});
+
+describe("1-based turn index enforcement (§7)", () => {
+  const INVALID_TURN_INDICES = [0, -1, 1.5] as const;
+
+  it("rejects non-1-based turn indices when building generation input", () => {
+    for (const turnIndex of INVALID_TURN_INDICES) {
+      expect(() =>
+        buildGenerationInput({
+          turnIndex,
+          promptText: BASE_PROMPT_TEXT,
+          attachmentFileIds: [],
+          attemptKind: "initial",
+          previousResponseId: null,
+        }),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it("rejects non-1-based turn indices when building the canonical request", () => {
+    for (const turnIndex of INVALID_TURN_INDICES) {
+      expect(() =>
+        buildCanonicalGenerationRequest(baseGenerationRequestParams({ turnIndex })),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it("accepts turn index 1 for both builders", () => {
+    const items = buildGenerationInput({
+      turnIndex: 1,
+      promptText: BASE_PROMPT_TEXT,
+      attachmentFileIds: [],
+      attemptKind: "initial",
+      previousResponseId: null,
+    });
+
+    expect(items[0]?.role).toBe("developer");
+    expect(items[items.length - 1]?.role).toBe("user");
+
+    const request = buildCanonicalGenerationRequest(
+      baseGenerationRequestParams({ turnIndex: 1 }),
+    );
+    expect(request.idempotencyKey).toBe(`${BASE_JOB_ID}:t1:a1:c0`);
+    const body = parseBody(request.requestBody);
+    const developer = asRecord(asItems(body.input, "input")[0], "input[0]");
+    expect(firstContentItem(developer, "developer").text).toContain(
+      "<!-- TURN_END:1 -->",
+    );
+  });
+
+  it("accepts every integer turn index above one", () => {
+    for (const turnIndex of [2, 3, 10]) {
+      const request = buildCanonicalGenerationRequest(
+        baseGenerationRequestParams({ turnIndex }),
+      );
+      expect(request.idempotencyKey).toBe(`${BASE_JOB_ID}:t${turnIndex}:a1:c0`);
     }
   });
 });

@@ -347,7 +347,7 @@ describe("migration ordering", () => {
 
 describe("migration source invariants", () => {
   it("never reads or writes PRAGMA user_version", () => {
-    const schemaSourcePath = fileURLToPath(new URL("../../src/db/schema.ts", import.meta.url));
+    const schemaSourcePath = fileURLToPath(new URL("../../src/db/schema.ts", import.meta.url).href);
     const source = readFileSync(schemaSourcePath, "utf8");
 
     const executableSource = source

@@ -662,6 +662,12 @@ describe("fetchWithAbort", () => {
   });
 });
 
+// Node's Request does not declare `cf`; tests inject Cloudflare metadata at runtime.
+function setCfMetadata(request: Request, value: unknown): void {
+  const target = request as unknown as { cf?: unknown };
+  target.cf = value;
+}
+
 describe("getSafeCfMetadata", () => {
   it("returns defined null defaults for a plain Request without cf metadata", () => {
     const request = new Request("https://worker.test/jobs");
@@ -714,10 +720,8 @@ describe("getSafeCfMetadata", () => {
   });
 
   it("tolerates a non-object cf value", () => {
-    const request = new Request("https://worker.test/jobs") as unknown as {
-      cf: unknown;
-    };
-    request.cf = null;
+    const request = new Request("https://worker.test/jobs");
+    setCfMetadata(request, null);
 
     expect(getSafeCfMetadata(request)).toEqual({
       colo: null,
@@ -727,7 +731,7 @@ describe("getSafeCfMetadata", () => {
       tlsVersion: null,
     });
 
-    request.cf = "not-an-object" as unknown as Record<string, unknown>;
+    setCfMetadata(request, "not-an-object");
 
     expect(getSafeCfMetadata(request).colo).toBeNull();
   });

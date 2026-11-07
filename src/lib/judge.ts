@@ -655,11 +655,6 @@ export function classifyJudgeEvaluation(
       "Judge result covers an incomplete applicable-file set; the result is accepted with a coverage warning.",
     );
   }
-  if (params.parse.output.file_visibility !== derivedCoverage) {
-    advisoryWarnings.push(
-      "Judge-reported file_visibility disagrees with the manifest-derived coverage; the manifest governs.",
-    );
-  }
 
   return {
     kind: "evaluated",

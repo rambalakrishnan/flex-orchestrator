@@ -625,11 +625,9 @@ describe("extraction and outcome classification", () => {
     expect(evaluated.output).toEqual(parsed.output);
     expect(evaluated.responseId).toBe("resp_judge_1");
     expect(evaluated.usage).toBe(TEST_USAGE);
-    // Incomplete coverage plus a judge that claimed full visibility: the
-    // manifest governs, so both the coverage and disagreement warnings appear.
-    expect(evaluated.advisoryWarnings).toHaveLength(2);
+    // Incomplete coverage is the only advisory; the manifest governs visibility.
+    expect(evaluated.advisoryWarnings).toHaveLength(1);
     expect(evaluated.advisoryWarnings[0]).toContain("coverage warning");
-    expect(evaluated.advisoryWarnings[1]).toContain("disagrees");
   });
 
   it("evaluates complete coverage with no warnings", () => {

@@ -1,0 +1,1417 @@
+/**
+ * Schema (`src/db/schema.ts`) — SQLite schemas, migrations, and shared artifact guards.
+ *
+ * Defines strict SQLite tables, manual `_sql_schema_migrations` version tracking
+ * (since `PRAGMA user_version` is unsupported in Cloudflare Durable Object SQLite),
+ * pure byte-limit guards (`1,500,000` artifact/row guard, `8,000,000` branch snapshot
+ * guard, `16,000,000` file upload guard), primary-key cursor pagination clamping,
+ * parameter batch chunking, and `SQLITE_FULL` / artifact-guard error classification.
+ */
+
+// ============================================================================
+// Fixed Limits & Guard Constants
+// ============================================================================
+
+/** Every retained artifact and every resulting SQLite row has a 1,500,000-byte guard. */
+export const ARTIFACT_BYTE_LIMIT = 1_500_000;
+
+/** Resulting row guard (1,500,000 bytes), leaving headroom beneath the 2 MB DO SQLite limit. */
+export const ROW_BYTE_LIMIT = 1_500_000;
+
+/** Reserved byte capacity on artifact-bearing rows for bounded control metadata and diagnostics. */
+export const ROW_METADATA_RESERVE_BYTES = 65_536;
+
+/** Branch initialization snapshots are bounded to 8,000,000 encoded bytes. */
+export const BRANCH_SNAPSHOT_BYTE_LIMIT = 8_000_000;
+
+/** Client-submitted file upload limit is 16,000,000 file bytes. */
+export const FILE_UPLOAD_BYTE_LIMIT = 16_000_000;
+
+/** Minimum page size for primary-key cursor pagination. */
+export const LIST_PAGE_LIMIT_MIN = 1;
+
+/** Maximum page size for primary-key cursor pagination. */
+export const LIST_PAGE_LIMIT_MAX = 100;
+
+/** Default page size for primary-key cursor pagination when unspecified. */
+export const LIST_PAGE_LIMIT_DEFAULT = 50;
+
+/** Hard Durable Object SQLite limit on bound parameters per query. */
+export const SQL_MAX_BOUND_PARAMS = 100;
+
+/** Current schema version for `JobDO`, `RouterDO`, and `RegistryDO`. */
+export const CURRENT_SCHEMA_VERSION = 1;
+
+// ============================================================================
+// Minimal Structural SQL Interfaces (Compatible with Cloudflare SqlStorage)
+// ============================================================================
+
+/** Valid column value types supported by Durable Object SQLite storage. */
+export type SqlPrimitiveValue = ArrayBuffer | Uint8Array | string | number | null;
+
+/** Minimal synchronous cursor interface matching `SqlStorageCursor`. */
+export interface SchemaSqlCursor<T extends Record<string, SqlPrimitiveValue> = Record<string, SqlPrimitiveValue>>
+  extends Iterable<T> {
+  toArray(): T[];
+  one(): T;
+  readonly rowsRead: number;
+  readonly rowsWritten: number;
+}
+
+/** Minimal synchronous SQL executor matching `ctx.storage.sql`. */
+export interface SchemaSqlStorage {
+  exec<T extends Record<string, SqlPrimitiveValue> = Record<string, SqlPrimitiveValue>>(
+    query: string,
+    ...bindings: SqlPrimitiveValue[]
+  ): SchemaSqlCursor<T>;
+  readonly databaseSize?: number;
+}
+
+/** Minimal synchronous transaction host matching `ctx.storage`. */
+export interface SchemaTransactionalStorage {
+  readonly sql: SchemaSqlStorage;
+  transactionSync<T>(closure: () => T): T;
+  deleteAll?(): Promise<void>;
+  deleteAlarm?(): Promise<void>;
+}
+
+// ============================================================================
+// Explicit Errors (No Truncation, Distinct SQLITE_FULL)
+// ============================================================================
+
+export type SchemaGuardKind =
+  | "artifact_bytes"
+  | "row_bytes"
+  | "branch_snapshot_bytes"
+  | "file_upload_bytes"
+  | "sql_bound_params";
+
+/**
+ * Raised when an artifact, resulting row, branch snapshot, or file upload
+ * violates its byte guard. Oversized artifacts never fall back to truncation.
+ */
+export class ArtifactGuardError extends Error {
+  readonly code = "ARTIFACT_GUARD_EXCEEDED" as const;
+  readonly kind: SchemaGuardKind;
+  readonly actualBytes: number;
+  readonly limitBytes: number;
+  readonly context: string;
+
+  constructor(
+    kind: SchemaGuardKind,
+    actualBytes: number,
+    limitBytes: number,
+    context = "artifact"
+  ) {
+    super(
+      `Guard violation (${kind}) on ${context}: ${actualBytes} bytes exceeds limit of ${limitBytes} bytes`
+    );
+    this.name = "ArtifactGuardError";
+    this.kind = kind;
+    this.actualBytes = actualBytes;
+    this.limitBytes = limitBytes;
+    this.context = context;
+  }
+}
+
+/**
+ * Raised when a SQLite-backed Durable Object reaches its storage ceiling (`SQLITE_FULL`).
+ */
+export class StorageFullError extends Error {
+  readonly code = "SQLITE_FULL" as const;
+  override readonly cause: unknown;
+
+  constructor(message = "Durable Object SQLite storage is full (SQLITE_FULL)", cause?: unknown) {
+    super(message);
+    this.name = "StorageFullError";
+    this.cause = cause;
+  }
+}
+
+/**
+ * Raised when a schema migration fails inside `blockConcurrencyWhile`.
+ */
+export class SchemaMigrationError extends Error {
+  readonly code = "SCHEMA_MIGRATION_FAILED" as const;
+  readonly targetName: string;
+  readonly version: number;
+  override readonly cause: unknown;
+
+  constructor(targetName: string, version: number, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Schema migration failed for ${targetName} at version ${version}: ${detail}`);
+    this.name = "SchemaMigrationError";
+    this.targetName = targetName;
+    this.version = version;
+    this.cause = cause;
+  }
+}
+
+// ============================================================================
+// Pure Guard & Validation Functions (Testable with Mocked Numbers)
+// ============================================================================
+
+const utf8Encoder = new TextEncoder();
+
+/**
+ * Returns the exact UTF-8 or raw byte length of a string or binary buffer.
+ */
+export function measureByteLength(value: string | ArrayBuffer | ArrayBufferView | null | undefined): number {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+  if (typeof value === "string") {
+    return utf8Encoder.encode(value).byteLength;
+  }
+  if (value instanceof ArrayBuffer) {
+    return value.byteLength;
+  }
+  if (ArrayBuffer.isView(value)) {
+    return value.byteLength;
+  }
+  throw new ArtifactGuardError("artifact_bytes", Number.NaN, ARTIFACT_BYTE_LIMIT, "invalid_payload_type");
+}
+
+/**
+ * Converts a string, `ArrayBuffer`, or `ArrayBufferView` into a `Uint8Array` BLOB
+ * and enforces the 1,500,000-byte artifact guard before returning.
+ */
+export function toGuardedBlob(
+  value: string | ArrayBuffer | Uint8Array,
+  context = "artifact",
+  limit = ARTIFACT_BYTE_LIMIT
+): { readonly blob: Uint8Array; readonly byteLength: number } {
+  const blob =
+    typeof value === "string"
+      ? utf8Encoder.encode(value)
+      : value instanceof Uint8Array
+        ? value
+        : new Uint8Array(value);
+  guardBytes(blob.byteLength, limit, "artifact_bytes", context);
+  return { blob, byteLength: blob.byteLength };
+}
+
+/**
+ * Pure numeric byte-limit validator. Rejects negative numbers, `NaN`, `Infinity`,
+ * non-integers, and values above `limit`.
+ *
+ * Designed for direct unit testing with mocked numbers without allocating multi-megabyte buffers.
+ */
+export function guardBytes(
+  bytes: number,
+  limit = ARTIFACT_BYTE_LIMIT,
+  kind: SchemaGuardKind = "artifact_bytes",
+  context = "artifact"
+): number {
+  if (
+    typeof bytes !== "number" ||
+    !Number.isFinite(bytes) ||
+    !Number.isInteger(bytes) ||
+    bytes < 0 ||
+    bytes > limit
+  ) {
+    throw new ArtifactGuardError(kind, bytes, limit, context);
+  }
+  return bytes;
+}
+
+/**
+ * Enforces the 1,500,000-byte guard on a single artifact's byte count.
+ */
+export function assertArtifactSize(bytes: number, context = "artifact"): number {
+  return guardBytes(bytes, ARTIFACT_BYTE_LIMIT, "artifact_bytes", context);
+}
+
+/**
+ * Enforces both the per-artifact 1,500,000-byte guard and the resulting-row
+ * 1,500,000-byte guard (artifact bytes + metadata bytes), plus reserved control headroom.
+ */
+export function assertArtifactAndRowSize(
+  artifactBytes: number,
+  metadataBytes = 0,
+  context = "row"
+): { readonly artifactBytes: number; readonly metadataBytes: number; readonly rowBytes: number } {
+  assertArtifactSize(artifactBytes, `${context}.artifact`);
+  guardBytes(metadataBytes, ROW_BYTE_LIMIT, "row_bytes", `${context}.metadata`);
+  const rowBytes = artifactBytes + metadataBytes;
+  guardBytes(rowBytes, ROW_BYTE_LIMIT, "row_bytes", context);
+  return { artifactBytes, metadataBytes, rowBytes };
+}
+
+/**
+ * Enforces the 8,000,000-byte guard on encoded branch snapshots.
+ */
+export function assertBranchSnapshotSize(bytes: number, context = "branch_snapshot"): number {
+  return guardBytes(bytes, BRANCH_SNAPSHOT_BYTE_LIMIT, "branch_snapshot_bytes", context);
+}
+
+/**
+ * Enforces the 16,000,000-byte limit on uploaded source files.
+ */
+export function assertFileUploadSize(bytes: number, context = "file_upload"): number {
+  return guardBytes(bytes, FILE_UPLOAD_BYTE_LIMIT, "file_upload_bytes", context);
+}
+
+/**
+ * Clamps a list query limit to the required `[1, 100]` range.
+ * Defaults to `50` when `rawLimit` is `undefined` or `null`.
+ */
+export function clampPageLimit(rawLimit?: number | null): number {
+  if (rawLimit === undefined || rawLimit === null || Number.isNaN(rawLimit)) {
+    return LIST_PAGE_LIMIT_DEFAULT;
+  }
+  const truncated = Math.trunc(rawLimit);
+  if (truncated < LIST_PAGE_LIMIT_MIN) {
+    return LIST_PAGE_LIMIT_MIN;
+  }
+  if (truncated > LIST_PAGE_LIMIT_MAX) {
+    return LIST_PAGE_LIMIT_MAX;
+  }
+  return truncated;
+}
+
+/**
+ * Splits a batch of rows into chunks whose bound parameter count never exceeds
+ * the Durable Object SQLite 100-parameter ceiling (`rowsPerChunk * paramsPerRow <= 100`).
+ */
+export function chunkRowsForBindLimit<T>(
+  rows: readonly T[],
+  paramsPerRow: number,
+  maxBoundParams = SQL_MAX_BOUND_PARAMS
+): T[][] {
+  if (!Number.isInteger(paramsPerRow) || paramsPerRow <= 0 || paramsPerRow > maxBoundParams) {
+    throw new ArtifactGuardError("sql_bound_params", paramsPerRow, maxBoundParams, "params_per_row");
+  }
+  const maxRowsPerChunk = Math.floor(maxBoundParams / paramsPerRow);
+  const chunks: T[][] = [];
+  for (let i = 0; i < rows.length; i += maxRowsPerChunk) {
+    chunks.push(rows.slice(i, i + maxRowsPerChunk));
+  }
+  return chunks;
+}
+
+/**
+ * Inspects an unknown error and returns `true` when it represents `SQLITE_FULL`.
+ */
+export function isSqliteFullError(error: unknown): boolean {
+  if (error instanceof StorageFullError) {
+    return true;
+  }
+  if (error instanceof Error) {
+    return (
+      error.message.includes("SQLITE_FULL") ||
+      error.message.includes("database or disk is full")
+    );
+  }
+  if (typeof error === "string") {
+    return error.includes("SQLITE_FULL") || error.includes("database or disk is full");
+  }
+  return false;
+}
+
+/**
+ * Wraps synchronous SQL execution so `SQLITE_FULL` is rethrown as a distinct,
+ * catchable `StorageFullError` and `ArtifactGuardError` passes through untouched.
+ */
+export function withSqlErrorMapping<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error: unknown) {
+    if (error instanceof ArtifactGuardError || error instanceof StorageFullError) {
+      throw error;
+    }
+    if (isSqliteFullError(error)) {
+      throw new StorageFullError(
+        error instanceof Error ? error.message : "database or disk is full: SQLITE_FULL",
+        error
+      );
+    }
+    throw error;
+  }
+}
+
+// ============================================================================
+// Migration Tracking Table (`_sql_schema_migrations` — NEVER `PRAGMA user_version`)
+// ============================================================================
+
+export const CREATE_SCHEMA_MIGRATIONS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+  id INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+) STRICT;
+`.trim();
+
+export interface SchemaMigrationRow extends Record<string, SqlPrimitiveValue> {
+  id: number;
+  applied_at: string;
+}
+
+// ============================================================================
+// JobDO Schema (Strict Tables + 1.5 MB Artifact & Row Guards)
+// ============================================================================
+
+/**
+ * `jobs` — Single-row (or job- keyed) definition, status, revision, and counters for `JobDO`.
+ */
+export const CREATE_JOBS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS jobs (
+  job_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'created',
+      'running',
+      'paused_review',
+      'paused_dispatch',
+      'paused_storage',
+      'completed',
+      'failed',
+      'cancelled',
+      'superseded'
+    )
+  ),
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL,
+  max_output_tokens INTEGER NOT NULL CHECK (max_output_tokens > 0),
+  cache_ttl TEXT NOT NULL CHECK (cache_ttl IN ('30m', '12h', '24h', 'nocache')),
+  web_search INTEGER NOT NULL DEFAULT 0 CHECK (web_search IN (0, 1)),
+  judge_config_json TEXT NOT NULL CHECK (json_valid(judge_config_json)),
+  continuation_budget INTEGER NOT NULL DEFAULT 3 CHECK (continuation_budget = 3),
+  continuations_used INTEGER NOT NULL DEFAULT 0 CHECK (continuations_used >= 0 AND continuations_used <= 3),
+  auto_retry_budget INTEGER NOT NULL DEFAULT 1 CHECK (auto_retry_budget = 1),
+  auto_retries_used INTEGER NOT NULL DEFAULT 0 CHECK (auto_retries_used >= 0 AND auto_retries_used <= 1),
+  manual_retries_used INTEGER NOT NULL DEFAULT 0 CHECK (manual_retries_used >= 0),
+  current_turn_index INTEGER NOT NULL DEFAULT 1 CHECK (current_turn_index >= 1),
+  total_turns INTEGER NOT NULL CHECK (total_turns >= 1),
+  accepted_turn_index INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turn_index >= 0),
+  active_attempt_id TEXT,
+  last_accepted_response_id TEXT,
+  last_judge_response_id TEXT,
+  parent_job_id TEXT,
+  fork_turn_index INTEGER,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  last_error_code TEXT,
+  last_error_detail TEXT,
+  warnings_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(warnings_json)),
+  usage_summary_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(usage_summary_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    length(job_id) +
+    length(title) +
+    length(model) +
+    length(judge_config_json) +
+    length(warnings_json) +
+    length(usage_summary_json) +
+    COALESCE(length(last_error_detail), 0) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `branch_lineage` — Branch provenance and snapshot metadata (bounded to 8,000,000 encoded bytes).
+ */
+export const CREATE_BRANCH_LINEAGE_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS branch_lineage (
+  job_id TEXT PRIMARY KEY,
+  parent_job_id TEXT NOT NULL,
+  parent_revision INTEGER NOT NULL CHECK (parent_revision >= 1),
+  fork_turn_index INTEGER NOT NULL CHECK (fork_turn_index >= 0),
+  snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes >= 0 AND snapshot_bytes <= 8000000),
+  snapshot_sha256 TEXT NOT NULL,
+  files_protected INTEGER NOT NULL DEFAULT 0 CHECK (files_protected IN (0, 1)),
+  parent_superseded INTEGER NOT NULL DEFAULT 0 CHECK (parent_superseded IN (0, 1)),
+  created_at TEXT NOT NULL
+) STRICT;
+`.trim();
+
+/**
+ * `job_files` — File references attached to a job/turn (catalogue `file_id` references only; no source file bytes).
+ */
+export const CREATE_JOB_FILES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS job_files (
+  file_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 0),
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  sha256 TEXT NOT NULL,
+  introduced_in_judge_call_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (turn_index, file_id)
+) STRICT;
+`.trim();
+
+/**
+ * `turns` — Sequential turns within a job.
+ * Prompt text is stored as a guarded BLOB (`prompt_blob`) with independent artifact and row 1.5 MB guards.
+ */
+export const CREATE_TURNS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS turns (
+  turn_index INTEGER PRIMARY KEY CHECK (turn_index >= 1),
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'pending',
+      'running',
+      'judging',
+      'paused_review',
+      'accepted',
+      'failed',
+      'cancelled'
+    )
+  ),
+  prompt_blob BLOB NOT NULL CHECK (length(prompt_blob) <= 1500000),
+  prompt_bytes INTEGER NOT NULL CHECK (
+    prompt_bytes >= 0 AND
+    prompt_bytes <= 1500000 AND
+    length(prompt_blob) = prompt_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= prompt_bytes AND
+    row_bytes <= 1500000
+  ),
+  attachment_file_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(attachment_file_ids_json)),
+  accepted_candidate_id TEXT,
+  accepted_attempt_id TEXT,
+  accepted_response_id TEXT,
+  accepted_with_warning INTEGER NOT NULL DEFAULT 0 CHECK (accepted_with_warning IN (0, 1)),
+  marginal_input_tokens INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    length(prompt_blob) +
+    length(attachment_file_ids_json) +
+    COALESCE(length(accepted_candidate_id), 0) +
+    COALESCE(length(accepted_attempt_id), 0) +
+    COALESCE(length(accepted_response_id), 0) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `turn_candidates` — Normalized deliverable text for a turn candidate.
+ * Each artifact occupies one BLOB in its owning row (`deliverable_blob`) with 1.5 MB guards.
+ */
+export const CREATE_TURN_CANDIDATES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS turn_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  attempt_id TEXT NOT NULL,
+  structural_status TEXT NOT NULL CHECK (
+    structural_status IN (
+      'valid',
+      'missing_tag',
+      'wrong_index',
+      'empty_output',
+      'refusal',
+      'incomplete',
+      'provider_failed',
+      'cancelled'
+    )
+  ),
+  parsed_tag_index INTEGER,
+  deliverable_blob BLOB CHECK (deliverable_blob IS NULL OR length(deliverable_blob) <= 1500000),
+  deliverable_bytes INTEGER NOT NULL CHECK (
+    deliverable_bytes >= 0 AND
+    deliverable_bytes <= 1500000 AND
+    COALESCE(length(deliverable_blob), 0) = deliverable_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= deliverable_bytes AND
+    row_bytes <= 1500000
+  ),
+   accepted INTEGER NOT NULL DEFAULT 0 CHECK (accepted IN (0, 1)),
+  warning_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(warning_json)),
+  created_at TEXT NOT NULL,
+  CHECK (
+    COALESCE(length(deliverable_blob), 0) +
+    length(candidate_id) +
+    length(attempt_id) +
+    length(structural_status) +
+    length(warning_json) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `generation_attempts` — Exact canonical UTF-8 generation request body BLOB and execution metadata.
+ * Authorization headers are never stored.
+ */
+export const CREATE_GENERATION_ATTEMPTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS generation_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+  continuation_index INTEGER NOT NULL DEFAULT 0 CHECK (continuation_index >= 0 AND continuation_index <= 3),
+  kind TEXT NOT NULL CHECK (kind IN ('initial', 'continuation', 'auto_retry', 'manual_retry')),
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'prepared',
+      'dispatching',
+      'dispatched',
+      'capacity_backoff',
+      'ambiguous_dispatch',
+      'completed',
+      'failed',
+      'cancelled',
+      'incomplete'
+    )
+  ),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  provider_response_id TEXT,
+  parent_response_id TEXT,
+  capacity_sends INTEGER NOT NULL DEFAULT 0 CHECK (capacity_sends >= 0 AND capacity_sends <= 5),
+  next_backoff_at_ms INTEGER,
+  poll_probes INTEGER NOT NULL DEFAULT 0 CHECK (poll_probes >= 0 AND poll_probes <= 24),
+  next_poll_at_ms INTEGER,
+  request_blob BLOB NOT NULL CHECK (length(request_blob) <= 1500000),
+  request_bytes INTEGER NOT NULL CHECK (
+    request_bytes > 0 AND
+    request_bytes <= 1500000 AND
+    length(request_blob) = request_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= request_bytes AND
+    row_bytes <= 1500000
+  ),
+  usage_json TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
+  diagnostics_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(diagnostics_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    length(request_blob) +
+    length(attempt_id) +
+    length(idempotency_key) +
+    COALESCE(length(provider_response_id), 0) +
+    COALESCE(length(usage_json), 0) +
+    length(diagnostics_json) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `attempt_response_artifacts` — Retained provider response payload BLOB for a generation attempt.
+ * Kept in its own one-BLOB-per-row table so `generation_attempts` holds `request_blob` and this holds `response_blob`.
+ */
+export const CREATE_ATTEMPT_RESPONSE_ARTIFACTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS attempt_response_artifacts (
+  attempt_id TEXT PRIMARY KEY,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  provider_response_id TEXT NOT NULL,
+  response_blob BLOB NOT NULL CHECK (length(response_blob) <= 1500000),
+  response_bytes INTEGER NOT NULL CHECK (
+    response_bytes > 0 AND
+    response_bytes <= 1500000 AND
+    length(response_blob) = response_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= response_bytes AND
+    row_bytes <= 1500000
+  ),
+  created_at TEXT NOT NULL,
+  CHECK (
+    length(response_blob) +
+    length(attempt_id) +
+    length(provider_response_id) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `judge_calls` — Canonical judge request BLOB (including encoded inline file bytes when inline delivery is used)
+ * and the validated five-field judge result (`verdict`, `grade`, `comment`, `tag_agreement`, `file_visibility`).
+ */
+export const CREATE_JUDGE_CALLS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS judge_calls (
+  judge_call_id TEXT PRIMARY KEY,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  candidate_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  transport TEXT NOT NULL CHECK (transport IN ('responses', 'chat_completions')),
+  history_mode TEXT NOT NULL CHECK (history_mode IN ('chained', 'stateless')),
+  file_delivery_mode TEXT NOT NULL CHECK (file_delivery_mode IN ('passthrough', 'inline')),
+  model TEXT NOT NULL,
+  provider_response_id TEXT,
+  previous_judge_response_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'unknown', 'failed')),
+  verdict TEXT CHECK (verdict IS NULL OR verdict IN ('PASS', 'FAIL', 'UNKNOWN')),
+  grade INTEGER CHECK (grade IS NULL OR (grade >= 0 AND grade <= 100)),
+  comment TEXT,
+  tag_agreement INTEGER CHECK (tag_agreement IS NULL OR tag_agreement IN (0, 1)),
+  file_visibility INTEGER CHECK (file_visibility IS NULL OR file_visibility IN (0, 1)),
+  manifest_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(manifest_json)),
+  request_blob BLOB NOT NULL CHECK (length(request_blob) <= 1500000),
+  request_bytes INTEGER NOT NULL CHECK (
+    request_bytes > 0 AND
+    request_bytes <= 1500000 AND
+    length(request_blob) = request_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= request_bytes AND
+    row_bytes <= 1500000
+  ),
+  usage_json TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
+  diagnostics_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(diagnostics_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    length(request_blob) +
+    length(judge_call_id) +
+    length(candidate_id) +
+    length(attempt_id) +
+    length(model) +
+    COALESCE(length(comment), 0) +
+    length(manifest_json) +
+    COALESCE(length(usage_json), 0) +
+    length(diagnostics_json) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+/**
+ * `durable_work` — Scheduled obligations and deadlines driving the single per-DO alarm in `JobDO`.
+ */
+export const CREATE_DURABLE_WORK_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS durable_work (
+  work_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (
+    kind IN (
+      'capacity_backoff',
+      'fallback_poll',
+      'webhook_process',
+      'judge_dispatch',
+      'cleanup'
+    )
+  ),
+  attempt_id TEXT,
+  turn_index INTEGER,
+  due_at_ms INTEGER NOT NULL CHECK (due_at_ms >= 0),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  CHECK (length(work_id) + length(payload_json) <= 1500000)
+) STRICT;
+`.trim();
+
+export const JOB_DO_INDEX_SQL_STATEMENTS: readonly string[] = [
+  "CREATE INDEX IF NOT EXISTS idx_turn_candidates_turn ON turn_candidates (turn_index, candidate_id);",
+  "CREATE INDEX IF NOT EXISTS idx_generation_attempts_turn ON generation_attempts (turn_index, attempt_number);",
+  "CREATE INDEX IF NOT EXISTS idx_generation_attempts_response ON generation_attempts (provider_response_id);",
+  "CREATE INDEX IF NOT EXISTS idx_judge_calls_turn ON judge_calls (turn_index, judge_call_id);",
+  "CREATE INDEX IF NOT EXISTS idx_durable_work_due ON durable_work (due_at_ms, work_id);",
+];
+
+// ============================================================================
+// RouterDO Schema (Response Routing & Durable Webhook Inbox)
+// ============================================================================
+
+/**
+ * `response_routes` — Maps OpenAI `response_id` to its owning `job_id` and `attempt_id`.
+ */
+export const CREATE_RESPONSE_ROUTES_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS response_routes (
+  response_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  status TEXT NOT NULL CHECK (status IN ('registered', 'delivered', 'settled')),
+  registered_at_ms INTEGER NOT NULL CHECK (registered_at_ms >= 0),
+  delivered_at_ms INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(response_id) + length(job_id) + length(attempt_id) <= 1500000)
+) STRICT;
+`.trim();
+
+/**
+ * `webhook_inbox` — Durable inbox of signature-verified OpenAI webhook deliveries.
+ * Stores the exact raw verified payload in `raw_body_blob` with 1.5 MB artifact and row guards.
+ */
+export const CREATE_WEBHOOK_INBOX_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS webhook_inbox (
+  webhook_id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL CHECK (
+    event_type IN (
+      'response.completed',
+      'response.cancelled',
+      'response.failed',
+      'response.incomplete'
+    )
+  ),
+  response_id TEXT NOT NULL,
+  job_id TEXT,
+  delivery_timestamp_sec INTEGER NOT NULL CHECK (delivery_timestamp_sec >= 0),
+  received_at_ms INTEGER NOT NULL CHECK (received_at_ms >= 0),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'unmatched', 'delivered', 'duplicate', 'failed')),
+  delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
+  next_attempt_at_ms INTEGER,
+  raw_body_blob BLOB NOT NULL CHECK (length(raw_body_blob) <= 1500000),
+  raw_body_bytes INTEGER NOT NULL CHECK (
+    raw_body_bytes > 0 AND
+    raw_body_bytes <= 1500000 AND
+    length(raw_body_blob) = raw_body_bytes
+  ),
+  row_bytes INTEGER NOT NULL CHECK (
+    row_bytes >= raw_body_bytes AND
+    row_bytes <= 1500000
+  ),
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    length(raw_body_blob) +
+    length(webhook_id) +
+    length(event_type) +
+    length(response_id) +
+    COALESCE(length(job_id), 0) +
+    COALESCE(length(last_error), 0) <= 1500000
+  )
+) STRICT;
+`.trim();
+
+export const ROUTER_DO_INDEX_SQL_STATEMENTS: readonly string[] = [
+  "CREATE INDEX IF NOT EXISTS idx_response_routes_job ON response_routes (job_id, response_id);",
+  "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_response ON webhook_inbox (response_id, webhook_id);",
+  "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_due ON webhook_inbox (status, next_attempt_at_ms, webhook_id);",
+];
+
+// ============================================================================
+// RegistryDO Schema (Global Job Index, File Catalogue, Upload Intents & Retention)
+// ============================================================================
+
+/**
+ * `job_index` — Global job directory in `RegistryDO` (lists use primary-key cursors, no BLOBs).
+ */
+export const CREATE_JOB_INDEX_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS job_index (
+  job_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'created',
+      'running',
+      'paused_review',
+      'paused_dispatch',
+      'paused_storage',
+      'completed',
+      'failed',
+      'cancelled',
+      'superseded'
+    )
+  ),
+  model TEXT NOT NULL,
+  parent_job_id TEXT,
+  is_terminal INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0, 1)),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(job_id) + length(title) + length(model) <= 1500000)
+) STRICT;
+`.trim();
+
+/**
+ * `file_catalogue` — Global OpenAI Files (`purpose: "user_data"`) metadata and live SHA-256 deduplication.
+ * Never stores source file bytes. Enforces the 16,000,000-byte upload limit on `byte_size`.
+ */
+export const CREATE_FILE_CATALOGUE_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS file_catalogue (
+  file_id TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  purpose TEXT NOT NULL DEFAULT 'user_data' CHECK (purpose = 'user_data'),
+  status TEXT NOT NULL CHECK (status IN ('live', 'deleting', 'deleted', 'failed')),
+  active_job_refs INTEGER NOT NULL DEFAULT 0 CHECK (active_job_refs >= 0),
+  retention_eligible_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  deleted_at_ms INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(file_id) + length(sha256) + length(filename) + length(mime_type) <= 1500000)
+) STRICT;
+`.trim();
+
+/**
+ * `upload_intents` — Tracks in-flight and ambiguous uploads for deduplication and recovery cleanup.
+ */
+export const CREATE_UPLOAD_INTENTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS upload_intents (
+  intent_id TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'uploaded', 'ambiguous', 'cleaned', 'failed')),
+  file_id TEXT,
+  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(intent_id) + length(sha256) + length(filename) + length(mime_type) <= 1500000)
+) STRICT;
+`.trim();
+
+/**
+ * `job_file_refs` — Tracks which jobs reference which catalogued files so non-terminal jobs protect files from retention cleanup.
+ */
+export const CREATE_JOB_FILE_REFS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS job_file_refs (
+  job_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  is_non_terminal INTEGER NOT NULL DEFAULT 1 CHECK (is_non_terminal IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, file_id)
+) STRICT;
+`.trim();
+
+export const REGISTRY_DO_INDEX_SQL_STATEMENTS: readonly string[] = [
+  "CREATE INDEX IF NOT EXISTS idx_file_catalogue_sha256_live ON file_catalogue (sha256, status);",
+  "CREATE INDEX IF NOT EXISTS idx_file_catalogue_retention ON file_catalogue (status, active_job_refs, retention_eligible_at_ms);",
+  "CREATE INDEX IF NOT EXISTS idx_upload_intents_expiry ON upload_intents (status, expires_at_ms);",
+  "CREATE INDEX IF NOT EXISTS idx_job_file_refs_file ON job_file_refs (file_id, is_non_terminal);",
+];
+
+// ============================================================================
+// Grouped DDL Collections
+// ============================================================================
+
+export const JOB_DO_TABLE_DDL: readonly string[] = [
+  CREATE_JOBS_TABLE_SQL,
+  CREATE_BRANCH_LINEAGE_TABLE_SQL,
+  CREATE_JOB_FILES_TABLE_SQL,
+  CREATE_TURNS_TABLE_SQL,
+  CREATE_TURN_CANDIDATES_TABLE_SQL,
+  CREATE_GENERATION_ATTEMPTS_TABLE_SQL,
+  CREATE_ATTEMPT_RESPONSE_ARTIFACTS_TABLE_SQL,
+  CREATE_JUDGE_CALLS_TABLE_SQL,
+  CREATE_DURABLE_WORK_TABLE_SQL,
+];
+
+export const ROUTER_DO_TABLE_DDL: readonly string[] = [
+  CREATE_RESPONSE_ROUTES_TABLE_SQL,
+  CREATE_WEBHOOK_INBOX_TABLE_SQL,
+];
+
+export const REGISTRY_DO_TABLE_DDL: readonly string[] = [
+  CREATE_JOB_INDEX_TABLE_SQL,
+  CREATE_FILE_CATALOGUE_TABLE_SQL,
+  CREATE_UPLOAD_INTENTS_TABLE_SQL,
+  CREATE_JOB_FILE_REFS_TABLE_SQL,
+];
+
+export const ALL_SCHEMA_TABLE_DDL: readonly string[] = [
+  CREATE_SCHEMA_MIGRATIONS_TABLE_SQL,
+  ...JOB_DO_TABLE_DDL,
+  ...ROUTER_DO_TABLE_DDL,
+  ...REGISTRY_DO_TABLE_DDL,
+];
+
+// ============================================================================
+// Typed Row Interfaces (Mirroring STRICT SQLite Columns)
+// ============================================================================
+
+export type JobStatus =
+  | "created"
+  | "running"
+  | "paused_review"
+  | "paused_dispatch"
+  | "paused_storage"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "superseded";
+
+export type CacheTtlOption = "30m" | "12h" | "24h" | "nocache";
+
+export interface JobRow extends Record<string, SqlPrimitiveValue> {
+  job_id: string;
+  title: string;
+  status: JobStatus;
+  model: string;
+  reasoning_effort: string;
+  max_output_tokens: number;
+  cache_ttl: CacheTtlOption;
+  web_search: number;
+  judge_config_json: string;
+  continuation_budget: number;
+  continuations_used: number;
+  auto_retry_budget: number;
+  auto_retries_used: number;
+  manual_retries_used: number;
+  current_turn_index: number;
+  total_turns: number;
+  accepted_turn_index: number;
+  active_attempt_id: string | null;
+  last_accepted_response_id: string | null;
+  last_judge_response_id: string | null;
+  parent_job_id: string | null;
+  fork_turn_index: number | null;
+  revision: number;
+  last_error_code: string | null;
+  last_error_detail: string | null;
+  warnings_json: string;
+  usage_summary_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BranchLineageRow extends Record<string, SqlPrimitiveValue> {
+  job_id: string;
+  parent_job_id: string;
+  parent_revision: number;
+  fork_turn_index: number;
+  snapshot_bytes: number;
+  snapshot_sha256: string;
+  files_protected: number;
+  parent_superseded: number;
+  created_at: string;
+}
+
+export interface JobFileRow extends Record<string, SqlPrimitiveValue> {
+  file_id: string;
+  turn_index: number;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  sha256: string;
+  introduced_in_judge_call_id: string | null;
+  created_at: string;
+}
+
+/** `turns` row including `prompt_blob`. Omit `prompt_blob` in list queries (`TurnSummaryRow`). */
+export interface TurnRow extends Record<string, SqlPrimitiveValue> {
+  turn_index: number;
+  status: "pending" | "running" | "judging" | "paused_review" | "accepted" | "failed" | "cancelled";
+  prompt_blob: ArrayBuffer | Uint8Array;
+  prompt_bytes: number;
+  row_bytes: number;
+  attachment_file_ids_json: string;
+  accepted_candidate_id: string | null;
+  accepted_attempt_id: string | null;
+  accepted_response_id: string | null;
+  accepted_with_warning: number;
+  marginal_input_tokens: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type TurnSummaryRow = Omit<TurnRow, "prompt_blob">;
+
+export type CandidateStructuralStatus =
+  | "valid"
+  | "missing_tag"
+  | "wrong_index"
+  | "empty_output"
+  | "refusal"
+  | "incomplete"
+  | "provider_failed"
+  | "cancelled";
+
+export interface TurnCandidateRow extends Record<string, SqlPrimitiveValue> {
+  candidate_id: string;
+  turn_index: number;
+  attempt_id: string;
+  structural_status: CandidateStructuralStatus;
+  parsed_tag_index: number | null;
+  deliverable_blob: ArrayBuffer | Uint8Array | null;
+  deliverable_bytes: number;
+  row_bytes: number;
+  accepted: number;
+  warning_json: string;
+  created_at: string;
+}
+
+export type TurnCandidateSummaryRow = Omit<TurnCandidateRow, "deliverable_blob">;
+
+export interface GenerationAttemptRow extends Record<string, SqlPrimitiveValue> {
+  attempt_id: string;
+  turn_index: number;
+  attempt_number: number;
+  continuation_index: number;
+  kind: "initial" | "continuation" | "auto_retry" | "manual_retry";
+  status:
+    | "prepared"
+    | "dispatching"
+    | "dispatched"
+    | "capacity_backoff"
+    | "ambiguous_dispatch"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "incomplete";
+  idempotency_key: string;
+  provider_response_id: string | null;
+  parent_response_id: string | null;
+  capacity_sends: number;
+  next_backoff_at_ms: number | null;
+  poll_probes: number;
+  next_poll_at_ms: number | null;
+  request_blob: ArrayBuffer | Uint8Array;
+  request_bytes: number;
+  row_bytes: number;
+  usage_json: string | null;
+  diagnostics_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type GenerationAttemptSummaryRow = Omit<GenerationAttemptRow, "request_blob">;
+
+export interface AttemptResponseArtifactRow extends Record<string, SqlPrimitiveValue> {
+  attempt_id: string;
+  turn_index: number;
+  provider_response_id: string;
+  response_blob: ArrayBuffer | Uint8Array;
+  response_bytes: number;
+  row_bytes: number;
+  created_at: string;
+}
+
+export type AttemptResponseArtifactSummaryRow = Omit<AttemptResponseArtifactRow, "response_blob">;
+
+export interface JudgeCallRow extends Record<string, SqlPrimitiveValue> {
+  judge_call_id: string;
+  turn_index: number;
+  candidate_id: string;
+  attempt_id: string;
+  transport: "responses" | "chat_completions";
+  history_mode: "chained" | "stateless";
+  file_delivery_mode: "passthrough" | "inline";
+  model: string;
+  provider_response_id: string | null;
+  previous_judge_response_id: string | null;
+  status: "pending" | "completed" | "unknown" | "failed";
+  verdict: "PASS" | "FAIL" | "UNKNOWN" | null;
+  grade: number | null;
+  comment: string | null;
+  tag_agreement: number | null;
+  file_visibility: number | null;
+  manifest_json: string;
+  request_blob: ArrayBuffer | Uint8Array;
+  request_bytes: number;
+  row_bytes: number;
+  usage_json: string | null;
+  diagnostics_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type JudgeCallSummaryRow = Omit<JudgeCallRow, "request_blob">;
+
+export interface DurableWorkRow extends Record<string, SqlPrimitiveValue> {
+  work_id: string;
+  kind: "capacity_backoff" | "fallback_poll" | "webhook_process" | "judge_dispatch" | "cleanup";
+  attempt_id: string | null;
+  turn_index: number | null;
+  due_at_ms: number;
+  payload_json: string;
+  created_at: string;
+}
+
+export interface ResponseRouteRow extends Record<string, SqlPrimitiveValue> {
+  response_id: string;
+  job_id: string;
+  attempt_id: string;
+  turn_index: number;
+  status: "registered" | "delivered" | "settled";
+  registered_at_ms: number;
+  delivered_at_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebhookInboxRow extends Record<string, SqlPrimitiveValue> {
+  webhook_id: string;
+  event_type:
+    | "response.completed"
+    | "response.cancelled"
+    | "response.failed"
+    | "response.incomplete";
+  response_id: string;
+  job_id: string | null;
+  delivery_timestamp_sec: number;
+  received_at_ms: number;
+  status: "pending" | "unmatched" | "delivered" | "duplicate" | "failed";
+  delivery_attempts: number;
+  next_attempt_at_ms: number | null;
+  raw_body_blob: ArrayBuffer | Uint8Array;
+  raw_body_bytes: number;
+  row_bytes: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WebhookInboxSummaryRow = Omit<WebhookInboxRow, "raw_body_blob">;
+
+export interface JobIndexRow extends Record<string, SqlPrimitiveValue> {
+  job_id: string;
+  title: string;
+  status: JobStatus;
+  model: string;
+  parent_job_id: string | null;
+  is_terminal: number;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileCatalogueRow extends Record<string, SqlPrimitiveValue> {
+  file_id: string;
+  sha256: string;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  purpose: "user_data";
+  status: "live" | "deleting" | "deleted" | "failed";
+  active_job_refs: number;
+  retention_eligible_at_ms: number | null;
+  created_at_ms: number;
+  deleted_at_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UploadIntentRow extends Record<string, SqlPrimitiveValue> {
+  intent_id: string;
+  sha256: string;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  status: "pending" | "uploaded" | "ambiguous" | "cleaned" | "failed";
+  file_id: string | null;
+  expires_at_ms: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobFileRefRow extends Record<string, SqlPrimitiveValue> {
+  job_id: string;
+  file_id: string;
+  is_non_terminal: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================================
+// BLOB-Free Column Projections for List Queries
+// ============================================================================
+
+export const TURNS_SUMMARY_COLUMNS =
+  "turn_index, status, prompt_bytes, row_bytes, attachment_file_ids_json, accepted_candidate_id, accepted_attempt_id, accepted_response_id, accepted_with_warning, marginal_input_tokens, created_at, updated_at";
+
+export const TURN_CANDIDATES_SUMMARY_COLUMNS =
+  "candidate_id, turn_index, attempt_id, structural_status, parsed_tag_index, deliverable_bytes, row_bytes, accepted, warning_json, created_at";
+
+export const GENERATION_ATTEMPTS_SUMMARY_COLUMNS =
+  "attempt_id, turn_index, attempt_number, continuation_index, kind, status, idempotency_key, provider_response_id, parent_response_id, capacity_sends, next_backoff_at_ms, poll_probes, next_poll_at_ms, request_bytes, row_bytes, usage_json, diagnostics_json, created_at, updated_at";
+
+export const JUDGE_CALLS_SUMMARY_COLUMNS =
+  "judge_call_id, turn_index, candidate_id, attempt_id, transport, history_mode, file_delivery_mode, model, provider_response_id, previous_judge_response_id, status, verdict, grade, comment, tag_agreement, file_visibility, manifest_json, request_bytes, row_bytes, usage_json, diagnostics_json, created_at, updated_at";
+
+export const WEBHOOK_INBOX_SUMMARY_COLUMNS =
+  "webhook_id, event_type, response_id, job_id, delivery_timestamp_sec, received_at_ms, status, delivery_attempts, next_attempt_at_ms, raw_body_bytes, row_bytes, last_error, created_at, updated_at";
+
+// ============================================================================
+// Migration Runner & Schema Introspection Helpers
+// ============================================================================
+
+export interface SchemaMigrationStep {
+  readonly version: number;
+  readonly statements: readonly string[];
+  readonly indexStatements?: readonly string[];
+}
+
+export const JOB_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
+  {
+    version: 1,
+    statements: JOB_DO_TABLE_DDL,
+    indexStatements: JOB_DO_INDEX_SQL_STATEMENTS,
+  },
+];
+
+export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
+  {
+    version: 1,
+    statements: ROUTER_DO_TABLE_DDL,
+    indexStatements: ROUTER_DO_INDEX_SQL_STATEMENTS,
+  },
+];
+
+export const REGISTRY_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
+  {
+    version: 1,
+    statements: REGISTRY_DO_TABLE_DDL,
+    indexStatements: REGISTRY_DO_INDEX_SQL_STATEMENTS,
+  },
+];
+
+/**
+ * Reads the current schema version from `_sql_schema_migrations` (`COALESCE(MAX(id), 0)`).
+ * Never caches version state in memory across Durable Object evictions or resets.
+ */
+export function getCurrentSchemaVersion(sql: SchemaSqlStorage): number {
+  sql.exec(CREATE_SCHEMA_MIGRATIONS_TABLE_SQL);
+  const row = sql
+    .exec<{ version: number }>(
+      "SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations"
+    )
+    .one();
+  return typeof row.version === "number" ? row.version : Number(row.version);
+}
+
+/**
+ * Checks whether a column already exists on `tableName` using `PRAGMA table_info`.
+ * Used to guard `ALTER TABLE ... ADD COLUMN` idempotently since SQLite lacks `ADD COLUMN IF NOT EXISTS`.
+ */
+export function hasTableColumn(
+  sql: SchemaSqlStorage,
+  tableName: string,
+  columnName: string
+): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) {
+    throw new Error(`Invalid SQLite identifier: ${tableName}`);
+  }
+  const columns = sql
+    .exec<{ name: string }>(`PRAGMA table_info(${tableName})`)
+    .toArray();
+  return columns.some((c) => c.name === columnName);
+}
+
+/**
+ * Checks whether a table exists using `PRAGMA table_list`.
+ */
+export function hasTable(sql: SchemaSqlStorage, tableName: string): boolean {
+  const tables = sql.exec<{ name: string }>("PRAGMA table_list").toArray();
+  return tables.some((t) => t.name === tableName);
+}
+
+/**
+ * Runs a set of versioned migrations synchronously inside `storage.transactionSync`.
+ *
+ * - Never uses `PRAGMA user_version`.
+ * - Executes one SQL statement per `sql.exec(...)` call inside `transactionSync`.
+ * - Records each version in `_sql_schema_migrations` only after all statements for that version succeed.
+ * - Runs `PRAGMA optimize` after index-creating versions.
+ * - Re-reads `_sql_schema_migrations` on every invocation (no module-level in-memory cache).
+ */
+export function runSchemaMigrations(
+  storage: SchemaTransactionalStorage,
+  targetName: string,
+  steps: readonly SchemaMigrationStep[]
+): { readonly version: number; readonly appliedVersions: readonly number[] } {
+  return withSqlErrorMapping(() => {
+    const sql = storage.sql;
+    const currentVersion = getCurrentSchemaVersion(sql);
+    const appliedVersions: number[] = [];
+
+    for (const step of steps) {
+      if (step.version <= currentVersion) {
+        continue;
+      }
+
+      let createdIndexes = false;
+      try {
+        storage.transactionSync(() => {
+          for (const stmt of step.statements) {
+            sql.exec(stmt);
+          }
+          if (step.indexStatements && step.indexStatements.length > 0) {
+            for (const indexStmt of step.indexStatements) {
+              sql.exec(indexStmt);
+            }
+            createdIndexes = true;
+          }
+          sql.exec(
+            "INSERT INTO _sql_schema_migrations (id) VALUES (?)",
+            step.version
+          );
+        });
+      } catch (error: unknown) {
+        if (isSqliteFullError(error)) {
+          throw new StorageFullError(
+            error instanceof Error ? error.message : "database or disk is full: SQLITE_FULL",
+            error
+          );
+        }
+        throw new SchemaMigrationError(targetName, step.version, error);
+      }
+
+      if (createdIndexes) {
+        sql.exec("PRAGMA optimize");
+      }
+      appliedVersions.push(step.version);
+    }
+
+    const finalVersion =
+      appliedVersions.length > 0
+        ? appliedVersions[appliedVersions.length - 1]!
+        : currentVersion;
+
+    return { version: finalVersion, appliedVersions };
+  });
+}
+
+/** Convenience migration entrypoint for `JobDO` constructor `blockConcurrencyWhile`. */
+export function migrateJobDoSchema(storage: SchemaTransactionalStorage): {
+  readonly version: number;
+  readonly appliedVersions: readonly number[];
+} {
+  return runSchemaMigrations(storage, "JobDO", JOB_DO_MIGRATIONS);
+}
+
+/** Convenience migration entrypoint for `RouterDO` constructor `blockConcurrencyWhile`. */
+export function migrateRouterDoSchema(storage: SchemaTransactionalStorage): {
+  readonly version: number;
+  readonly appliedVersions: readonly number[];
+} {
+  return runSchemaMigrations(storage, "RouterDO", ROUTER_DO_MIGRATIONS);
+}
+
+/** Convenience migration entrypoint for `RegistryDO` constructor `blockConcurrencyWhile`. */
+export function migrateRegistryDoSchema(storage: SchemaTransactionalStorage): {
+  readonly version: number;
+  readonly appliedVersions: readonly number[];
+} {
+  return runSchemaMigrations(storage, "RegistryDO", REGISTRY_DO_MIGRATIONS);
+}
+
+// ============================================================================
+// Diagnostics & Storage Reset Helpers
+// ============================================================================
+
+export interface DatabaseDiagnostics {
+  readonly schemaVersion: number;
+  readonly databaseSizeBytes: number;
+  readonly artifactByteLimit: number;
+  readonly rowByteLimit: number;
+}
+
+/**
+ * Surfaces current schema version and `sql.databaseSize` for diagnostics endpoints.
+ */
+export function getDatabaseDiagnostics(sql: SchemaSqlStorage): DatabaseDiagnostics {
+  const schemaVersion = getCurrentSchemaVersion(sql);
+  const databaseSizeBytes = typeof sql.databaseSize === "number" ? sql.databaseSize : 0;
+  return {
+    schemaVersion,
+    databaseSizeBytes,
+    artifactByteLimit: ARTIFACT_BYTE_LIMIT,
+    rowByteLimit: ROW_BYTE_LIMIT,
+  };
+}
+
+/**
+ * Resets a Durable Object's storage and explicitly deletes any scheduled alarm
+ * so older compatibility configurations cannot leave an orphan alarm behind.
+ */
+export async function resetDurableObjectStorage(
+  storage: SchemaTransactionalStorage
+): Promise<void> {
+  if (typeof storage.deleteAlarm === "function") {
+    await storage.deleteAlarm();
+  }
+  if (typeof storage.deleteAll === "function") {
+    await storage.deleteAll();
+  }
+}

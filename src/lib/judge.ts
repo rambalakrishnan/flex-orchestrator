@@ -178,7 +178,6 @@ export function buildJudgeInstruction(params: {
 }
 
 function buildManifest(params: {
-  readonly config: EnabledJudgeConfig;
   readonly applicableFiles: readonly JudgeApplicableFile[];
   readonly deliveredNow: ReadonlySet<FileId>;
   readonly effectiveHistory: "stateful" | "stateless";
@@ -273,7 +272,6 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
       reason: "chat_completions_passthrough",
       message: "Chat Completions has no file-id passthrough mechanism",
       manifest: buildManifest({
-        config,
         applicableFiles: params.applicableFiles,
         deliveredNow: new Set<FileId>(),
         effectiveHistory: "stateless",
@@ -311,7 +309,6 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
   }
 
   const manifest = buildManifest({
-    config,
     applicableFiles: params.applicableFiles,
     deliveredNow: deliveredNowIds,
     effectiveHistory,
@@ -412,6 +409,43 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
       manifest,
       advisoryWarnings,
     },
+  };
+}
+
+/**
+ * Maps an unencodable judge request contract onto an explicit `unknown`
+ * evaluation outcome, so no caller falls through to a stripped request.
+ */
+export function judgeBuildFailureOutcome(params: {
+  readonly judgeCallId: JudgeCallId | null;
+  readonly outcome: Extract<JudgeRequestBuildOutcome, { readonly kind: "unencodable_contract" }>;
+}): JudgeEvaluationOutcome {
+  return {
+    kind: "unknown",
+    judgeCallId: params.judgeCallId,
+    reason:
+      params.outcome.reason === "artifact_guard_exceeded"
+        ? "artifact_guard_exceeded"
+        : "unencodable_contract",
+    message: params.outcome.message,
+    advisoryWarnings: params.outcome.advisoryWarnings,
+  };
+}
+
+/**
+ * Maps a missing or empty judge secret binding onto an explicit `unknown`
+ * evaluation outcome without touching the declared request contract.
+ */
+export function judgeMissingSecretOutcome(params: {
+  readonly judgeCallId: JudgeCallId | null;
+  readonly secretName: string;
+}): JudgeEvaluationOutcome {
+  return {
+    kind: "unknown",
+    judgeCallId: params.judgeCallId,
+    reason: "missing_secret",
+    message: `Judge secret binding is missing or empty: ${params.secretName}`,
+    advisoryWarnings: [],
   };
 }
 

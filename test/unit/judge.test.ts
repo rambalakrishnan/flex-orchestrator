@@ -8,7 +8,9 @@ import {
   classifyJudgeEvaluation,
   deriveFileVisibility,
   extractJudgeRawText,
+  judgeBuildFailureOutcome,
   judgeConfigAdvisoryWarnings,
+  judgeMissingSecretOutcome,
   parseJudgeOutput,
   resolvedContinuityMode,
 } from "../../src/lib/judge.ts";
@@ -645,5 +647,59 @@ describe("extraction and outcome classification", () => {
     expect(evaluated.kind).toBe("evaluated");
     if (evaluated.kind !== "evaluated") throw new Error("expected evaluated outcome");
     expect(evaluated.advisoryWarnings).toEqual([]);
+  });
+});
+
+describe("failure outcome helpers", () => {
+  it("does not accept a built outcome as a failure outcome", () => {
+    const built = expectBuilt(build(openAiJudge()));
+    // @ts-expect-error -- a built request carries no unencodable contract reason
+    const notAFailure: Parameters<typeof judgeBuildFailureOutcome>[0]["outcome"] = built;
+    expect(notAFailure).toBe(built);
+  });
+
+  it("maps an unencodable chat_completions passthrough contract to unencodable_contract", () => {
+    const outcome = expectUnencodable(build(chatCompletionsPassthroughJudge()));
+    const failure = judgeBuildFailureOutcome({ judgeCallId: "jc_1", outcome });
+
+    expect(failure).toEqual({
+      kind: "unknown",
+      judgeCallId: "jc_1",
+      reason: "unencodable_contract",
+      message: "Chat Completions has no file-id passthrough mechanism",
+      advisoryWarnings: outcome.advisoryWarnings,
+    });
+    if (failure.kind !== "unknown") {
+      throw new Error("expected unknown failure outcome");
+    }
+    expect(failure.advisoryWarnings.length).toBeGreaterThan(0);
+  });
+
+  it("maps an artifact guard overflow to artifact_guard_exceeded", () => {
+    const synthetic: Extract<JudgeRequestBuildOutcome, { readonly kind: "unencodable_contract" }> = {
+      kind: "unencodable_contract",
+      reason: "artifact_guard_exceeded",
+      message: "Judge request is 1500001 bytes, exceeding the 1500000-byte artifact guard",
+      manifest: COMPLETE_MANIFEST,
+      advisoryWarnings: ["advisory warning"],
+    };
+
+    expect(judgeBuildFailureOutcome({ judgeCallId: "jc_2", outcome: synthetic })).toEqual({
+      kind: "unknown",
+      judgeCallId: "jc_2",
+      reason: "artifact_guard_exceeded",
+      message: "Judge request is 1500001 bytes, exceeding the 1500000-byte artifact guard",
+      advisoryWarnings: ["advisory warning"],
+    });
+  });
+
+  it("maps a missing secret to missing_secret and preserves a null judge call id", () => {
+    expect(judgeMissingSecretOutcome({ judgeCallId: null, secretName: "JUDGE_KEY" })).toEqual({
+      kind: "unknown",
+      judgeCallId: null,
+      reason: "missing_secret",
+      message: "Judge secret binding is missing or empty: JUDGE_KEY",
+      advisoryWarnings: [],
+    });
   });
 });

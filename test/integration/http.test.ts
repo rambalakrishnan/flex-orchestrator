@@ -687,10 +687,11 @@ describe("fetchWithAbort", () => {
   });
 });
 
-// Node's Request does not declare `cf`; tests inject Cloudflare metadata at runtime.
-function setCfMetadata(request: Request, value: unknown): void {
-  const target = request as unknown as { cf?: unknown };
-  target.cf = value;
+// Workerd exposes `cf` as a read-only accessor on incoming Requests; a structural
+// stand-in lets tests supply the browser-only metadata field.
+function requestWithCf(cf: unknown): Request {
+  const requestLike: { cf?: unknown } = { cf };
+  return requestLike as unknown as Request;
 }
 
 describe("getSafeCfMetadata", () => {
@@ -709,16 +710,13 @@ describe("getSafeCfMetadata", () => {
   });
 
   it("reads well-typed cf fields", () => {
-    const request = new Request("https://worker.test/jobs") as Request & {
-      cf?: Record<string, unknown>;
-    };
-    request.cf = {
+    const request = requestWithCf({
       colo: "SFO",
       country: "US",
       asn: 64500,
       httpProtocol: "HTTP/2",
       tlsVersion: "TLSv1.3",
-    };
+    });
 
     expect(getSafeCfMetadata(request)).toEqual({
       colo: "SFO",
@@ -730,10 +728,7 @@ describe("getSafeCfMetadata", () => {
   });
 
   it("nulls out wrong-typed and missing cf properties", () => {
-    const request = new Request("https://worker.test/jobs") as Request & {
-      cf?: Record<string, unknown>;
-    };
-    request.cf = { colo: 42, country: "US", asn: "64500" };
+    const request = requestWithCf({ colo: 42, country: "US", asn: "64500" });
 
     expect(getSafeCfMetadata(request)).toEqual({
       colo: null,
@@ -745,8 +740,7 @@ describe("getSafeCfMetadata", () => {
   });
 
   it("tolerates a non-object cf value", () => {
-    const request = new Request("https://worker.test/jobs");
-    setCfMetadata(request, null);
+    const request = requestWithCf(null);
 
     expect(getSafeCfMetadata(request)).toEqual({
       colo: null,
@@ -756,8 +750,8 @@ describe("getSafeCfMetadata", () => {
       tlsVersion: null,
     });
 
-    setCfMetadata(request, "not-an-object");
+    const stringCfRequest = requestWithCf("not-an-object");
 
-    expect(getSafeCfMetadata(request).colo).toBeNull();
+    expect(getSafeCfMetadata(stringCfRequest).colo).toBeNull();
   });
 });

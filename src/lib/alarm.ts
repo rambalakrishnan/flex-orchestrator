@@ -62,8 +62,12 @@ export function toEpochMillis(time: number | Date): number {
 
 /**
  * Computes the earliest deadline (in epoch ms) from a collection of candidate
- * timestamps (`number | Date | null | undefined`). Returns `null` if no valid
- * finite timestamps are present.
+ * timestamps (`number | Date | null | undefined`). Returns `null` when the
+ * collection contains no non-null candidates.
+ *
+ * Throws `RangeError` when any non-null candidate is non-finite (NaN, Infinity,
+ * or an invalid Date) because `toEpochMillis` rejects it; invalid candidates
+ * are never silently skipped.
  */
 export function earliestDeadline(
   candidates: Iterable<number | Date | null | undefined>,

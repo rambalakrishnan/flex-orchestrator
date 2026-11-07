@@ -141,6 +141,8 @@ afterEach(async () => {
 
 **4. Upload dedupe and intent recovery.** Identical content hashes deduplicate source uploads. Ambiguous or redundant upload intents are recoverable and cleanable. Cover: `src/do/registry-do.ts`.
 
+**Body decoding note.** UTF-8 body decoding strips a leading byte-order mark as standard `TextDecoder` behavior (`ignoreBOM: false`); BOM stripping is standard behavior, not a custom acceptance or rejection rule.
+
 **5. File reference protection and retention.** Non-terminal file references are protected before a job becomes ready. RegistryDO periodically deletes retention-eligible files that no non-terminal job references. Drive the retention alarm with `runDurableObjectAlarm` and assert deletion against the catalogue. Cover: `src/do/registry-do.ts`, `src/db/jobs.ts`, `src/lib/alarm.ts`.
 
 **6. Artifact guards.** Every artifact and every resulting row independently enforce the **1,500,000-byte** guard, including encoded file bytes inside retained inline judge requests. Oversized artifacts produce explicit errors; nothing is truncated. Test the pure guard function exhaustively with `{ size: N }` mocks; include exactly one integration test per guard boundary (1,500,000 / 1,500,001) to verify wiring. Do not allocate real 1.5 MB payloads for every insert test. Cover: `src/db/schema.ts`, `src/do/job-do.ts`.

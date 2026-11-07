@@ -4,12 +4,19 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "typecheck": "bun check"
+    "typecheck": "bun check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:do": "vitest run test/do",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261107.1",
     "@types/bun": "latest",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^4.1.12",
     "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
     "wrangler": "^4.158.0"
   },
   "peerDependencies": {

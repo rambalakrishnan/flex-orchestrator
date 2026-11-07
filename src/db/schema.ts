@@ -1,43 +1,20 @@
 /**
- * Schema (`src/db/schema.ts`) — SQLite schemas, migrations, and shared artifact guards.
+ * Schema (`src/db/schema.ts`) — SQLite schemas, migrations, and SQL error classification.
  *
  * Defines strict SQLite tables, manual `_sql_schema_migrations` version tracking
  * (since `PRAGMA user_version` is unsupported in Cloudflare Durable Object SQLite),
- * pure byte-limit guards (`1,500,000` artifact/row guard, `8,000,000` branch snapshot
- * guard, `16,000,000` file upload guard), primary-key cursor pagination clamping,
- * parameter batch chunking, and `SQLITE_FULL` / artifact-guard error classification.
+ * and `SQLITE_FULL` / artifact-guard error classification. Every numeric limit is
+ * sourced from `src/constants.ts`; pure byte guards live in `src/lib/guards.ts`.
  */
 
-// ============================================================================
-// Fixed Limits & Guard Constants
-// ============================================================================
-
-/** Every retained artifact and every resulting SQLite row has a 1,500,000-byte guard. */
-export const ARTIFACT_BYTE_LIMIT = 1_500_000;
-
-/** Resulting row guard (1,500,000 bytes), leaving headroom beneath the 2 MB DO SQLite limit. */
-export const ROW_BYTE_LIMIT = 1_500_000;
-
-/** Reserved byte capacity on artifact-bearing rows for bounded control metadata and diagnostics. */
-export const ROW_METADATA_RESERVE_BYTES = 65_536;
-
-/** Branch initialization snapshots are bounded to 8,000,000 encoded bytes. */
-export const BRANCH_SNAPSHOT_BYTE_LIMIT = 8_000_000;
-
-/** Client-submitted file upload limit is 16,000,000 file bytes. */
-export const FILE_UPLOAD_BYTE_LIMIT = 16_000_000;
-
-/** Minimum page size for primary-key cursor pagination. */
-export const LIST_PAGE_LIMIT_MIN = 1;
-
-/** Maximum page size for primary-key cursor pagination. */
-export const LIST_PAGE_LIMIT_MAX = 100;
-
-/** Default page size for primary-key cursor pagination when unspecified. */
-export const LIST_PAGE_LIMIT_DEFAULT = 50;
-
-/** Hard Durable Object SQLite limit on bound parameters per query. */
-export const SQL_MAX_BOUND_PARAMS = 100;
+import {
+  ARTIFACT_ROW_GUARD_BYTES,
+  MAX_BRANCH_SNAPSHOT_BYTES,
+  MAX_FILE_UPLOAD_BYTES,
+  ROW_GUARD_BYTES,
+  TURN_INDEX_MIN,
+} from "../constants.ts";
+import { ArtifactGuardError } from "../lib/guards.ts";
 
 /** Current schema version for `JobDO`, `RouterDO`, and `RegistryDO`. */
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -79,41 +56,6 @@ export interface SchemaTransactionalStorage {
 // Explicit Errors (No Truncation, Distinct SQLITE_FULL)
 // ============================================================================
 
-export type SchemaGuardKind =
-  | "artifact_bytes"
-  | "row_bytes"
-  | "branch_snapshot_bytes"
-  | "file_upload_bytes"
-  | "sql_bound_params";
-
-/**
- * Raised when an artifact, resulting row, branch snapshot, or file upload
- * violates its byte guard. Oversized artifacts never fall back to truncation.
- */
-export class ArtifactGuardError extends Error {
-  readonly code = "ARTIFACT_GUARD_EXCEEDED" as const;
-  readonly kind: SchemaGuardKind;
-  readonly actualBytes: number;
-  readonly limitBytes: number;
-  readonly context: string;
-
-  constructor(
-    kind: SchemaGuardKind,
-    actualBytes: number,
-    limitBytes: number,
-    context = "artifact"
-  ) {
-    super(
-      `Guard violation (${kind}) on ${context}: ${actualBytes} bytes exceeds limit of ${limitBytes} bytes`
-    );
-    this.name = "ArtifactGuardError";
-    this.kind = kind;
-    this.actualBytes = actualBytes;
-    this.limitBytes = limitBytes;
-    this.context = context;
-  }
-}
-
 /**
  * Raised when a SQLite-backed Durable Object reaches its storage ceiling (`SQLITE_FULL`).
  */
@@ -148,147 +90,8 @@ export class SchemaMigrationError extends Error {
 }
 
 // ============================================================================
-// Pure Guard & Validation Functions (Testable with Mocked Numbers)
+// SQL Error Classification (`SQLITE_FULL` Mapping)
 // ============================================================================
-
-const utf8Encoder = new TextEncoder();
-
-/**
- * Returns the exact UTF-8 or raw byte length of a string or binary buffer.
- */
-export function measureByteLength(value: string | ArrayBuffer | ArrayBufferView | null | undefined): number {
-  if (value === null || value === undefined) {
-    return 0;
-  }
-  if (typeof value === "string") {
-    return utf8Encoder.encode(value).byteLength;
-  }
-  if (value instanceof ArrayBuffer) {
-    return value.byteLength;
-  }
-  if (ArrayBuffer.isView(value)) {
-    return value.byteLength;
-  }
-  throw new ArtifactGuardError("artifact_bytes", Number.NaN, ARTIFACT_BYTE_LIMIT, "invalid_payload_type");
-}
-
-/**
- * Converts a string, `ArrayBuffer`, or `ArrayBufferView` into a `Uint8Array` BLOB
- * and enforces the 1,500,000-byte artifact guard before returning.
- */
-export function toGuardedBlob(
-  value: string | ArrayBuffer | Uint8Array,
-  context = "artifact",
-  limit = ARTIFACT_BYTE_LIMIT
-): { readonly blob: Uint8Array; readonly byteLength: number } {
-  const blob =
-    typeof value === "string"
-      ? utf8Encoder.encode(value)
-      : value instanceof Uint8Array
-        ? value
-        : new Uint8Array(value);
-  guardBytes(blob.byteLength, limit, "artifact_bytes", context);
-  return { blob, byteLength: blob.byteLength };
-}
-
-/**
- * Pure numeric byte-limit validator. Rejects negative numbers, `NaN`, `Infinity`,
- * non-integers, and values above `limit`.
- *
- * Designed for direct unit testing with mocked numbers without allocating multi-megabyte buffers.
- */
-export function guardBytes(
-  bytes: number,
-  limit = ARTIFACT_BYTE_LIMIT,
-  kind: SchemaGuardKind = "artifact_bytes",
-  context = "artifact"
-): number {
-  if (
-    typeof bytes !== "number" ||
-    !Number.isFinite(bytes) ||
-    !Number.isInteger(bytes) ||
-    bytes < 0 ||
-    bytes > limit
-  ) {
-    throw new ArtifactGuardError(kind, bytes, limit, context);
-  }
-  return bytes;
-}
-
-/**
- * Enforces the 1,500,000-byte guard on a single artifact's byte count.
- */
-export function assertArtifactSize(bytes: number, context = "artifact"): number {
-  return guardBytes(bytes, ARTIFACT_BYTE_LIMIT, "artifact_bytes", context);
-}
-
-/**
- * Enforces both the per-artifact 1,500,000-byte guard and the resulting-row
- * 1,500,000-byte guard (artifact bytes + metadata bytes), plus reserved control headroom.
- */
-export function assertArtifactAndRowSize(
-  artifactBytes: number,
-  metadataBytes = 0,
-  context = "row"
-): { readonly artifactBytes: number; readonly metadataBytes: number; readonly rowBytes: number } {
-  assertArtifactSize(artifactBytes, `${context}.artifact`);
-  guardBytes(metadataBytes, ROW_BYTE_LIMIT, "row_bytes", `${context}.metadata`);
-  const rowBytes = artifactBytes + metadataBytes;
-  guardBytes(rowBytes, ROW_BYTE_LIMIT, "row_bytes", context);
-  return { artifactBytes, metadataBytes, rowBytes };
-}
-
-/**
- * Enforces the 8,000,000-byte guard on encoded branch snapshots.
- */
-export function assertBranchSnapshotSize(bytes: number, context = "branch_snapshot"): number {
-  return guardBytes(bytes, BRANCH_SNAPSHOT_BYTE_LIMIT, "branch_snapshot_bytes", context);
-}
-
-/**
- * Enforces the 16,000,000-byte limit on uploaded source files.
- */
-export function assertFileUploadSize(bytes: number, context = "file_upload"): number {
-  return guardBytes(bytes, FILE_UPLOAD_BYTE_LIMIT, "file_upload_bytes", context);
-}
-
-/**
- * Clamps a list query limit to the required `[1, 100]` range.
- * Defaults to `50` when `rawLimit` is `undefined` or `null`.
- */
-export function clampPageLimit(rawLimit?: number | null): number {
-  if (rawLimit === undefined || rawLimit === null || Number.isNaN(rawLimit)) {
-    return LIST_PAGE_LIMIT_DEFAULT;
-  }
-  const truncated = Math.trunc(rawLimit);
-  if (truncated < LIST_PAGE_LIMIT_MIN) {
-    return LIST_PAGE_LIMIT_MIN;
-  }
-  if (truncated > LIST_PAGE_LIMIT_MAX) {
-    return LIST_PAGE_LIMIT_MAX;
-  }
-  return truncated;
-}
-
-/**
- * Splits a batch of rows into chunks whose bound parameter count never exceeds
- * the Durable Object SQLite 100-parameter ceiling (`rowsPerChunk * paramsPerRow <= 100`).
- */
-export function chunkRowsForBindLimit<T>(
-  rows: readonly T[],
-  paramsPerRow: number,
-  maxBoundParams = SQL_MAX_BOUND_PARAMS
-): T[][] {
-  if (!Number.isInteger(paramsPerRow) || paramsPerRow <= 0 || paramsPerRow > maxBoundParams) {
-    throw new ArtifactGuardError("sql_bound_params", paramsPerRow, maxBoundParams, "params_per_row");
-  }
-  const maxRowsPerChunk = Math.floor(maxBoundParams / paramsPerRow);
-  const chunks: T[][] = [];
-  for (let i = 0; i < rows.length; i += maxRowsPerChunk) {
-    chunks.push(rows.slice(i, i + maxRowsPerChunk));
-  }
-  return chunks;
-}
 
 /**
  * Inspects an unknown error and returns `true` when it represents `SQLITE_FULL`.
@@ -360,6 +163,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   status TEXT NOT NULL CHECK (
     status IN (
       'created',
+      'ready',
       'running',
       'paused_review',
       'paused_dispatch',
@@ -381,7 +185,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   auto_retry_budget INTEGER NOT NULL DEFAULT 1 CHECK (auto_retry_budget = 1),
   auto_retries_used INTEGER NOT NULL DEFAULT 0 CHECK (auto_retries_used >= 0 AND auto_retries_used <= 1),
   manual_retries_used INTEGER NOT NULL DEFAULT 0 CHECK (manual_retries_used >= 0),
-  current_turn_index INTEGER NOT NULL DEFAULT 1 CHECK (current_turn_index >= 1),
+  current_turn_index INTEGER NOT NULL DEFAULT ${TURN_INDEX_MIN} CHECK (current_turn_index >= ${TURN_INDEX_MIN}),
   total_turns INTEGER NOT NULL CHECK (total_turns >= 1),
   accepted_turn_index INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turn_index >= 0),
   active_attempt_id TEXT,
@@ -403,7 +207,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     length(judge_config_json) +
     length(warnings_json) +
     length(usage_summary_json) +
-    COALESCE(length(last_error_detail), 0) <= 1500000
+    COALESCE(length(last_error_detail), 0) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -417,7 +221,7 @@ CREATE TABLE IF NOT EXISTS branch_lineage (
   parent_job_id TEXT NOT NULL,
   parent_revision INTEGER NOT NULL CHECK (parent_revision >= 1),
   fork_turn_index INTEGER NOT NULL CHECK (fork_turn_index >= 0),
-  snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes >= 0 AND snapshot_bytes <= 8000000),
+  snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes >= 0 AND snapshot_bytes <= ${MAX_BRANCH_SNAPSHOT_BYTES}),
   snapshot_sha256 TEXT NOT NULL,
   files_protected INTEGER NOT NULL DEFAULT 0 CHECK (files_protected IN (0, 1)),
   parent_superseded INTEGER NOT NULL DEFAULT 0 CHECK (parent_superseded IN (0, 1)),
@@ -434,7 +238,7 @@ CREATE TABLE IF NOT EXISTS job_files (
   turn_index INTEGER NOT NULL CHECK (turn_index >= 0),
   filename TEXT NOT NULL,
   mime_type TEXT NOT NULL,
-  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= ${MAX_FILE_UPLOAD_BYTES}),
   sha256 TEXT NOT NULL,
   introduced_in_judge_call_id TEXT,
   created_at TEXT NOT NULL,
@@ -448,27 +252,28 @@ CREATE TABLE IF NOT EXISTS job_files (
  */
 export const CREATE_TURNS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS turns (
-  turn_index INTEGER PRIMARY KEY CHECK (turn_index >= 1),
+  turn_index INTEGER PRIMARY KEY CHECK (turn_index >= ${TURN_INDEX_MIN}),
   status TEXT NOT NULL CHECK (
     status IN (
       'pending',
       'running',
-      'judging',
+      'awaiting_judge',
       'paused_review',
       'accepted',
+      'accepted_with_warning',
       'failed',
       'cancelled'
     )
   ),
-  prompt_blob BLOB NOT NULL CHECK (length(prompt_blob) <= 1500000),
+  prompt_blob BLOB NOT NULL CHECK (length(prompt_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   prompt_bytes INTEGER NOT NULL CHECK (
     prompt_bytes >= 0 AND
-    prompt_bytes <= 1500000 AND
+    prompt_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     length(prompt_blob) = prompt_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= prompt_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
   attachment_file_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(attachment_file_ids_json)),
   accepted_candidate_id TEXT,
@@ -483,7 +288,7 @@ CREATE TABLE IF NOT EXISTS turns (
     length(attachment_file_ids_json) +
     COALESCE(length(accepted_candidate_id), 0) +
     COALESCE(length(accepted_attempt_id), 0) +
-    COALESCE(length(accepted_response_id), 0) <= 1500000
+    COALESCE(length(accepted_response_id), 0) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -495,12 +300,15 @@ CREATE TABLE IF NOT EXISTS turns (
 export const CREATE_TURN_CANDIDATES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS turn_candidates (
   candidate_id TEXT PRIMARY KEY,
-  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  turn_index INTEGER NOT NULL CHECK (turn_index >= ${TURN_INDEX_MIN}),
   attempt_id TEXT NOT NULL,
   structural_status TEXT NOT NULL CHECK (
     structural_status IN (
       'valid',
+      'continuation',
+      'trailing_content',
       'missing_tag',
+      'malformed_tag',
       'wrong_index',
       'empty_output',
       'refusal',
@@ -510,15 +318,15 @@ CREATE TABLE IF NOT EXISTS turn_candidates (
     )
   ),
   parsed_tag_index INTEGER,
-  deliverable_blob BLOB CHECK (deliverable_blob IS NULL OR length(deliverable_blob) <= 1500000),
+  deliverable_blob BLOB CHECK (deliverable_blob IS NULL OR length(deliverable_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   deliverable_bytes INTEGER NOT NULL CHECK (
     deliverable_bytes >= 0 AND
-    deliverable_bytes <= 1500000 AND
+    deliverable_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     COALESCE(length(deliverable_blob), 0) = deliverable_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= deliverable_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
    accepted INTEGER NOT NULL DEFAULT 0 CHECK (accepted IN (0, 1)),
   warning_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(warning_json)),
@@ -528,7 +336,7 @@ CREATE TABLE IF NOT EXISTS turn_candidates (
     length(candidate_id) +
     length(attempt_id) +
     length(structural_status) +
-    length(warning_json) <= 1500000
+    length(warning_json) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -540,7 +348,7 @@ CREATE TABLE IF NOT EXISTS turn_candidates (
 export const CREATE_GENERATION_ATTEMPTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS generation_attempts (
   attempt_id TEXT PRIMARY KEY,
-  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  turn_index INTEGER NOT NULL CHECK (turn_index >= ${TURN_INDEX_MIN}),
   attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
   continuation_index INTEGER NOT NULL DEFAULT 0 CHECK (continuation_index >= 0 AND continuation_index <= 3),
   kind TEXT NOT NULL CHECK (kind IN ('initial', 'continuation', 'auto_retry', 'manual_retry')),
@@ -554,7 +362,9 @@ CREATE TABLE IF NOT EXISTS generation_attempts (
       'completed',
       'failed',
       'cancelled',
-      'incomplete'
+      'refused',
+      'incomplete',
+      'capacity_exhausted'
     )
   ),
   idempotency_key TEXT NOT NULL UNIQUE,
@@ -564,15 +374,15 @@ CREATE TABLE IF NOT EXISTS generation_attempts (
   next_backoff_at_ms INTEGER,
   poll_probes INTEGER NOT NULL DEFAULT 0 CHECK (poll_probes >= 0 AND poll_probes <= 24),
   next_poll_at_ms INTEGER,
-  request_blob BLOB NOT NULL CHECK (length(request_blob) <= 1500000),
+  request_blob BLOB NOT NULL CHECK (length(request_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   request_bytes INTEGER NOT NULL CHECK (
     request_bytes > 0 AND
-    request_bytes <= 1500000 AND
+    request_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     length(request_blob) = request_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= request_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
   usage_json TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
   diagnostics_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(diagnostics_json)),
@@ -584,7 +394,7 @@ CREATE TABLE IF NOT EXISTS generation_attempts (
     length(idempotency_key) +
     COALESCE(length(provider_response_id), 0) +
     COALESCE(length(usage_json), 0) +
-    length(diagnostics_json) <= 1500000
+    length(diagnostics_json) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -596,23 +406,23 @@ CREATE TABLE IF NOT EXISTS generation_attempts (
 export const CREATE_ATTEMPT_RESPONSE_ARTIFACTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS attempt_response_artifacts (
   attempt_id TEXT PRIMARY KEY,
-  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  turn_index INTEGER NOT NULL CHECK (turn_index >= ${TURN_INDEX_MIN}),
   provider_response_id TEXT NOT NULL,
-  response_blob BLOB NOT NULL CHECK (length(response_blob) <= 1500000),
+  response_blob BLOB NOT NULL CHECK (length(response_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   response_bytes INTEGER NOT NULL CHECK (
     response_bytes > 0 AND
-    response_bytes <= 1500000 AND
+    response_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     length(response_blob) = response_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= response_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
   created_at TEXT NOT NULL,
   CHECK (
     length(response_blob) +
     length(attempt_id) +
-    length(provider_response_id) <= 1500000
+    length(provider_response_id) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -624,7 +434,7 @@ CREATE TABLE IF NOT EXISTS attempt_response_artifacts (
 export const CREATE_JUDGE_CALLS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS judge_calls (
   judge_call_id TEXT PRIMARY KEY,
-  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  turn_index INTEGER NOT NULL CHECK (turn_index >= ${TURN_INDEX_MIN}),
   candidate_id TEXT NOT NULL,
   attempt_id TEXT NOT NULL,
   transport TEXT NOT NULL CHECK (transport IN ('responses', 'chat_completions')),
@@ -640,15 +450,15 @@ CREATE TABLE IF NOT EXISTS judge_calls (
   tag_agreement INTEGER CHECK (tag_agreement IS NULL OR tag_agreement IN (0, 1)),
   file_visibility INTEGER CHECK (file_visibility IS NULL OR file_visibility IN (0, 1)),
   manifest_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(manifest_json)),
-  request_blob BLOB NOT NULL CHECK (length(request_blob) <= 1500000),
+  request_blob BLOB NOT NULL CHECK (length(request_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   request_bytes INTEGER NOT NULL CHECK (
     request_bytes > 0 AND
-    request_bytes <= 1500000 AND
+    request_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     length(request_blob) = request_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= request_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
   usage_json TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
   diagnostics_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(diagnostics_json)),
@@ -663,7 +473,17 @@ CREATE TABLE IF NOT EXISTS judge_calls (
     COALESCE(length(comment), 0) +
     length(manifest_json) +
     COALESCE(length(usage_json), 0) +
-    length(diagnostics_json) <= 1500000
+    length(diagnostics_json) <= ${ARTIFACT_ROW_GUARD_BYTES}
+  ),
+  CHECK (
+    status <> 'completed' OR (
+      verdict IS NOT NULL AND
+      verdict IN ('PASS', 'FAIL') AND
+      grade IS NOT NULL AND
+      comment IS NOT NULL AND
+      tag_agreement IS NOT NULL AND
+      file_visibility IS NOT NULL
+    )
   )
 ) STRICT;
 `.trim();
@@ -688,7 +508,7 @@ CREATE TABLE IF NOT EXISTS durable_work (
   due_at_ms INTEGER NOT NULL CHECK (due_at_ms >= 0),
   payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
   created_at TEXT NOT NULL,
-  CHECK (length(work_id) + length(payload_json) <= 1500000)
+  CHECK (length(work_id) + length(payload_json) <= ${ARTIFACT_ROW_GUARD_BYTES})
 ) STRICT;
 `.trim();
 
@@ -712,13 +532,13 @@ CREATE TABLE IF NOT EXISTS response_routes (
   response_id TEXT PRIMARY KEY,
   job_id TEXT NOT NULL,
   attempt_id TEXT NOT NULL,
-  turn_index INTEGER NOT NULL CHECK (turn_index >= 1),
+  turn_index INTEGER NOT NULL CHECK (turn_index >= ${TURN_INDEX_MIN}),
   status TEXT NOT NULL CHECK (status IN ('registered', 'delivered', 'settled')),
   registered_at_ms INTEGER NOT NULL CHECK (registered_at_ms >= 0),
   delivered_at_ms INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (length(response_id) + length(job_id) + length(attempt_id) <= 1500000)
+  CHECK (length(response_id) + length(job_id) + length(attempt_id) <= ${ARTIFACT_ROW_GUARD_BYTES})
 ) STRICT;
 `.trim();
 
@@ -744,15 +564,15 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
   status TEXT NOT NULL CHECK (status IN ('pending', 'unmatched', 'delivered', 'duplicate', 'failed')),
   delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
   next_attempt_at_ms INTEGER,
-  raw_body_blob BLOB NOT NULL CHECK (length(raw_body_blob) <= 1500000),
+  raw_body_blob BLOB NOT NULL CHECK (length(raw_body_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   raw_body_bytes INTEGER NOT NULL CHECK (
     raw_body_bytes > 0 AND
-    raw_body_bytes <= 1500000 AND
+    raw_body_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
     length(raw_body_blob) = raw_body_bytes
   ),
   row_bytes INTEGER NOT NULL CHECK (
     row_bytes >= raw_body_bytes AND
-    row_bytes <= 1500000
+    row_bytes <= ${ARTIFACT_ROW_GUARD_BYTES}
   ),
   last_error TEXT,
   created_at TEXT NOT NULL,
@@ -763,7 +583,7 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
     length(event_type) +
     length(response_id) +
     COALESCE(length(job_id), 0) +
-    COALESCE(length(last_error), 0) <= 1500000
+    COALESCE(length(last_error), 0) <= ${ARTIFACT_ROW_GUARD_BYTES}
   )
 ) STRICT;
 `.trim();
@@ -788,6 +608,7 @@ CREATE TABLE IF NOT EXISTS job_index (
   status TEXT NOT NULL CHECK (
     status IN (
       'created',
+      'ready',
       'running',
       'paused_review',
       'paused_dispatch',
@@ -804,7 +625,7 @@ CREATE TABLE IF NOT EXISTS job_index (
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (length(job_id) + length(title) + length(model) <= 1500000)
+  CHECK (length(job_id) + length(title) + length(model) <= ${ARTIFACT_ROW_GUARD_BYTES})
 ) STRICT;
 `.trim();
 
@@ -818,7 +639,7 @@ CREATE TABLE IF NOT EXISTS file_catalogue (
   sha256 TEXT NOT NULL,
   filename TEXT NOT NULL,
   mime_type TEXT NOT NULL,
-  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= ${MAX_FILE_UPLOAD_BYTES}),
   purpose TEXT NOT NULL DEFAULT 'user_data' CHECK (purpose = 'user_data'),
   status TEXT NOT NULL CHECK (status IN ('live', 'deleting', 'deleted', 'failed')),
   active_job_refs INTEGER NOT NULL DEFAULT 0 CHECK (active_job_refs >= 0),
@@ -827,7 +648,7 @@ CREATE TABLE IF NOT EXISTS file_catalogue (
   deleted_at_ms INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (length(file_id) + length(sha256) + length(filename) + length(mime_type) <= 1500000)
+  CHECK (length(file_id) + length(sha256) + length(filename) + length(mime_type) <= ${ARTIFACT_ROW_GUARD_BYTES})
 ) STRICT;
 `.trim();
 
@@ -840,13 +661,13 @@ CREATE TABLE IF NOT EXISTS upload_intents (
   sha256 TEXT NOT NULL,
   filename TEXT NOT NULL,
   mime_type TEXT NOT NULL,
-  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= 16000000),
+  byte_size INTEGER NOT NULL CHECK (byte_size >= 0 AND byte_size <= ${MAX_FILE_UPLOAD_BYTES}),
   status TEXT NOT NULL CHECK (status IN ('pending', 'uploaded', 'ambiguous', 'cleaned', 'failed')),
   file_id TEXT,
   expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (length(intent_id) + length(sha256) + length(filename) + length(mime_type) <= 1500000)
+  CHECK (length(intent_id) + length(sha256) + length(filename) + length(mime_type) <= ${ARTIFACT_ROW_GUARD_BYTES})
 ) STRICT;
 `.trim();
 
@@ -912,6 +733,7 @@ export const ALL_SCHEMA_TABLE_DDL: readonly string[] = [
 
 export type JobStatus =
   | "created"
+  | "ready"
   | "running"
   | "paused_review"
   | "paused_dispatch"
@@ -981,7 +803,15 @@ export interface JobFileRow extends Record<string, SqlPrimitiveValue> {
 /** `turns` summary row omitting `prompt_blob` for list queries. */
 export interface TurnSummaryRow extends Record<string, SqlPrimitiveValue> {
   turn_index: number;
-  status: "pending" | "running" | "judging" | "paused_review" | "accepted" | "failed" | "cancelled";
+  status:
+    | "pending"
+    | "running"
+    | "awaiting_judge"
+    | "paused_review"
+    | "accepted"
+    | "accepted_with_warning"
+    | "failed"
+    | "cancelled";
   prompt_bytes: number;
   row_bytes: number;
   attachment_file_ids_json: string;
@@ -1001,7 +831,10 @@ export interface TurnRow extends TurnSummaryRow {
 
 export type CandidateStructuralStatus =
   | "valid"
+  | "continuation"
+  | "trailing_content"
   | "missing_tag"
+  | "malformed_tag"
   | "wrong_index"
   | "empty_output"
   | "refusal"
@@ -1041,7 +874,9 @@ export interface GenerationAttemptSummaryRow extends Record<string, SqlPrimitive
     | "completed"
     | "failed"
     | "cancelled"
-    | "incomplete";
+    | "refused"
+    | "incomplete"
+    | "capacity_exhausted";
   idempotency_key: string;
   provider_response_id: string | null;
   parent_response_id: string | null;
@@ -1403,8 +1238,8 @@ export function getDatabaseDiagnostics(sql: SchemaSqlStorage): DatabaseDiagnosti
   return {
     schemaVersion,
     databaseSizeBytes,
-    artifactByteLimit: ARTIFACT_BYTE_LIMIT,
-    rowByteLimit: ROW_BYTE_LIMIT,
+    artifactByteLimit: ARTIFACT_ROW_GUARD_BYTES,
+    rowByteLimit: ROW_GUARD_BYTES,
   };
 }
 

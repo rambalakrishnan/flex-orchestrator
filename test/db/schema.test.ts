@@ -4,10 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   ALL_SCHEMA_TABLE_DDL,
-  toGuardedBlob,
   type SchemaTransactionalStorage,
   type SqlPrimitiveValue,
 } from "../../src/db/schema.ts";
+import { toGuardedBlob } from "../../src/lib/guards.ts";
 import { closeSqliteStorage, createSqliteStorage, tableNames } from "../fixtures/sqlite.ts";
 
 const NOW_ISO = "2026-11-07T00:00:00.000Z";
@@ -879,6 +879,225 @@ describe("schema DDL validation", () => {
       NOW_ISO,
       NOW_ISO
     );
+  });
+
+  it("matches the frozen status vocabularies and rejects legacy status values", () => {
+    const { storage } = openSchema();
+    const prompt = toGuardedBlob("turn prompt", "turns.prompt_blob");
+    const deliverable = toGuardedBlob("deliverable body", "deliverable_blob");
+    const request = toGuardedBlob('{"model":"gpt-5"}', "request_blob");
+    const judgeRequest = toGuardedBlob('{"model":"judge-1"}', "judge_request_blob");
+
+    const insertJob = (jobId: string, status: string): void => {
+      storage.sql.exec(
+        `INSERT INTO jobs (
+           job_id, status, model, reasoning_effort, max_output_tokens, cache_ttl,
+           judge_config_json, total_turns, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        jobId,
+        status,
+        "gpt-5",
+        "high",
+        1024,
+        "nocache",
+        "{}",
+        1,
+        NOW_ISO,
+        NOW_ISO
+      );
+    };
+
+    insertJob("job_ready", "ready");
+    expect(countRows(storage, "jobs")).toBe(1);
+
+    for (const legacyStatus of ["paused_ambiguous_dispatch", "paused_storage_error"]) {
+      expectRejectedInsert(
+        storage,
+        "jobs",
+        `INSERT INTO jobs (
+           job_id, status, model, reasoning_effort, max_output_tokens, cache_ttl,
+           judge_config_json, total_turns, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `job_${legacyStatus}`,
+        legacyStatus,
+        "gpt-5",
+        "high",
+        1024,
+        "nocache",
+        "{}",
+        1,
+        NOW_ISO,
+        NOW_ISO
+      );
+    }
+
+    const insertTurn = (turnIndex: number, status: string): void => {
+      storage.sql.exec(
+        `INSERT INTO turns (
+           turn_index, status, prompt_blob, prompt_bytes, row_bytes,
+           attachment_file_ids_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        turnIndex,
+        status,
+        prompt.blob,
+        prompt.byteLength,
+        prompt.byteLength,
+        "[]",
+        NOW_ISO,
+        NOW_ISO
+      );
+    };
+
+    insertTurn(1, "awaiting_judge");
+    insertTurn(2, "accepted_with_warning");
+    expect(countRows(storage, "turns")).toBe(2);
+
+    expectRejectedInsert(
+      storage,
+      "turns",
+      `INSERT INTO turns (
+         turn_index, status, prompt_blob, prompt_bytes, row_bytes,
+         attachment_file_ids_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      3,
+      "judging",
+      prompt.blob,
+      prompt.byteLength,
+      prompt.byteLength,
+      "[]",
+      NOW_ISO,
+      NOW_ISO
+    );
+
+    const insertCandidate = (candidateId: string, structuralStatus: string): void => {
+      storage.sql.exec(
+        `INSERT INTO turn_candidates (
+           candidate_id, turn_index, attempt_id, structural_status, parsed_tag_index,
+           deliverable_blob, deliverable_bytes, row_bytes, accepted, warning_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        candidateId,
+        1,
+        "att_001",
+        structuralStatus,
+        null,
+        deliverable.blob,
+        deliverable.byteLength,
+        deliverable.byteLength,
+        0,
+        "[]",
+        NOW_ISO
+      );
+    };
+
+    insertCandidate("cand_continuation", "continuation");
+    insertCandidate("cand_trailing_content", "trailing_content");
+    insertCandidate("cand_malformed_tag", "malformed_tag");
+    expect(countRows(storage, "turn_candidates")).toBe(3);
+
+    const insertAttempt = (attemptId: string, status: string): void => {
+      storage.sql.exec(
+        `INSERT INTO generation_attempts (
+           attempt_id, turn_index, attempt_number, continuation_index, kind, status,
+           idempotency_key, request_blob, request_bytes, row_bytes, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        attemptId,
+        1,
+        1,
+        0,
+        "initial",
+        status,
+        `idem_${attemptId}`,
+        request.blob,
+        request.byteLength,
+        request.byteLength,
+        NOW_ISO,
+        NOW_ISO
+      );
+    };
+
+    insertAttempt("att_capacity_exhausted", "capacity_exhausted");
+    insertAttempt("att_refused", "refused");
+    insertAttempt("att_capacity_backoff", "capacity_backoff");
+    expect(countRows(storage, "generation_attempts")).toBe(3);
+
+    const JUDGE_CALL_INSERT_SQL = `INSERT INTO judge_calls (
+       judge_call_id, turn_index, candidate_id, attempt_id, transport, history_mode,
+       file_delivery_mode, model, status, verdict, grade, comment, tag_agreement,
+       file_visibility, request_blob, request_bytes, row_bytes, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    const insertJudgeCall = (
+      judgeCallId: string,
+      status: string,
+      verdict: string | null,
+      grade: number | null,
+      comment: string | null,
+      tagAgreement: number | null,
+      fileVisibility: number | null
+    ): void => {
+      storage.sql.exec(
+        JUDGE_CALL_INSERT_SQL,
+        judgeCallId,
+        1,
+        "cand_continuation",
+        "att_refused",
+        "responses",
+        "stateless",
+        "passthrough",
+        "judge-1",
+        status,
+        verdict,
+        grade,
+        comment,
+        tagAgreement,
+        fileVisibility,
+        judgeRequest.blob,
+        judgeRequest.byteLength,
+        judgeRequest.byteLength,
+        NOW_ISO,
+        NOW_ISO
+      );
+    };
+
+    insertJudgeCall("jcall_pending", "pending", null, null, null, null, null);
+    insertJudgeCall("jcall_unknown", "unknown", "UNKNOWN", null, null, null, null);
+    insertJudgeCall("jcall_complete", "completed", "PASS", 95, "Accurate.", 1, 1);
+    expect(countRows(storage, "judge_calls")).toBe(3);
+
+    const incompleteJudgeRows = [
+      ["jcall_completed_no_verdict", null, 95, "Accurate.", 1, 1],
+      ["jcall_completed_no_grade", "PASS", null, "Accurate.", 1, 1],
+      ["jcall_completed_no_comment", "PASS", 95, null, 1, 1],
+      ["jcall_completed_no_tag_agreement", "PASS", 95, "Accurate.", null, 1],
+      ["jcall_completed_no_file_visibility", "PASS", 95, "Accurate.", 1, null],
+    ] as const;
+
+    for (const [judgeCallId, verdict, grade, comment, tagAgreement, fileVisibility] of incompleteJudgeRows) {
+      expectRejectedInsert(
+        storage,
+        "judge_calls",
+        JUDGE_CALL_INSERT_SQL,
+        judgeCallId,
+        1,
+        "cand_continuation",
+        "att_refused",
+        "responses",
+        "stateless",
+        "passthrough",
+        "judge-1",
+        "completed",
+        verdict,
+        grade,
+        comment,
+        tagAgreement,
+        fileVisibility,
+        judgeRequest.blob,
+        judgeRequest.byteLength,
+        judgeRequest.byteLength,
+        NOW_ISO,
+        NOW_ISO
+      );
+    }
   });
 });
 

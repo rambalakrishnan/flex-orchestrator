@@ -95,6 +95,12 @@ export const LIST_PAGE_LIMIT_MAX = 100 as const;
 /** Default page size for primary-key cursor pagination when unspecified. */
 export const LIST_PAGE_LIMIT_DEFAULT = 50 as const;
 
+/** Hard Durable Object SQLite limit on bound parameters per query. */
+export const SQL_MAX_BOUND_PARAMS = 100 as const;
+
+/** Minimum valid turn index; turn indices are 1-based. */
+export const TURN_INDEX_MIN = 1 as const;
+
 /** Default file retention window in seconds (7 days) when env string is unparsed. */
 export const DEFAULT_FILE_RETENTION_SECONDS = 604_800 as const;
 

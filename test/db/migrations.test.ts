@@ -206,6 +206,42 @@ describe("migration tracking", () => {
       .toArray();
     expect(migrationRows.map((row) => row.id)).toEqual([1]);
   });
+
+  it("accepts the frozen job status vocabulary in the migrated jobs table", () => {
+    const { storage } = openEmpty();
+    migrateJobDoSchema(storage);
+
+    const insertJob = (jobId: string, status: string): void => {
+      storage.sql.exec(
+        `INSERT INTO jobs (
+           job_id, status, model, reasoning_effort, max_output_tokens, cache_ttl,
+           judge_config_json, total_turns, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        jobId,
+        status,
+        "gpt-5",
+        "high",
+        1024,
+        "nocache",
+        "{}",
+        1,
+        NOW_ISO,
+        NOW_ISO
+      );
+    };
+
+    insertJob("job_ready", "ready");
+    expect(
+      storage.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM jobs").one().total
+    ).toBe(1);
+
+    expect(() => insertJob("job_legacy", "paused_storage_error")).toThrow(
+      /CHECK constraint failed/i
+    );
+    expect(
+      storage.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM jobs").one().total
+    ).toBe(1);
+  });
 });
 
 describe("partial migration rollback", () => {

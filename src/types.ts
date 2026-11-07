@@ -19,6 +19,11 @@
 // ============================================================================
 
 export type JobId = string;
+
+/**
+ * Sequential turn position within a job. Strictly 1-based (`>= 1`): the first turn is `1`,
+ * and `0` is invalid.
+ */
 export type TurnIndex = number;
 export type AttemptId = string;
 export type JudgeCallId = string;
@@ -202,6 +207,26 @@ export type StructuralClassification =
   | {
       readonly kind: "missing_tag";
       readonly normalizedText: string;
+    }
+  | {
+      readonly kind: "trailing_content";
+      readonly turnIndex: TurnIndex;
+      readonly normalizedText: string;
+      readonly rawTag: string;
+      readonly trailingText: string;
+    }
+  | {
+      readonly kind: "provider_failed";
+    }
+  | {
+      readonly kind: "cancelled";
+    }
+  | {
+      readonly kind: "incomplete";
+    }
+  | {
+      readonly kind: "refusal";
+      readonly refusalText: string;
     };
 
 // ============================================================================
@@ -213,8 +238,8 @@ export type JobStatus =
   | "ready"
   | "running"
   | "paused_review"
-  | "paused_ambiguous_dispatch"
-  | "paused_storage_error"
+  | "paused_dispatch"
+  | "paused_storage"
   | "completed"
   | "failed"
   | "cancelled"
@@ -234,6 +259,7 @@ export type AttemptStatus =
   | "prepared"
   | "dispatching"
   | "dispatched"
+  | "capacity_backoff"
   | "ambiguous_dispatch"
   | "completed"
   | "failed"
@@ -341,7 +367,7 @@ export interface JudgeCallRecord {
   readonly historyMode: JudgeHistoryMode;
   readonly fileDeliveryMode: JudgeFileDeliveryMode;
   readonly responseId: ResponseId | null;
-  readonly status: "evaluated" | "unknown";
+  readonly status: "pending" | "completed" | "unknown" | "failed";
   readonly output: ValidatedJudgeOutput | null;
   readonly unknownReason: string | null;
   readonly unknownMessage: string | null;

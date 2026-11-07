@@ -989,7 +989,7 @@ describe("schema DDL validation", () => {
       );
     };
 
-    insertCandidate("cand_continuation", "continuation");
+    insertCandidate("cand_valid", "valid");
     insertCandidate("cand_trailing_content", "trailing_content");
     insertCandidate("cand_malformed_tag", "malformed_tag");
     expect(countRows(storage, "turn_candidates")).toBe(3);
@@ -1039,7 +1039,7 @@ describe("schema DDL validation", () => {
         JUDGE_CALL_INSERT_SQL,
         judgeCallId,
         1,
-        "cand_continuation",
+        "cand_valid",
         "att_refused",
         "responses",
         "stateless",
@@ -1079,7 +1079,7 @@ describe("schema DDL validation", () => {
         JUDGE_CALL_INSERT_SQL,
         judgeCallId,
         1,
-        "cand_continuation",
+        "cand_valid",
         "att_refused",
         "responses",
         "stateless",

@@ -133,7 +133,7 @@ export const FLEX_CAPACITY_BACKOFF_BASE_MS = 5_000 as const;
 /**
  * Maximum delay in milliseconds for project-level Flex capacity send exponential backoff.
  */
-export const FLEX_CAPACITY_BACKOFF_MAX_MS = 300_000 as const;
+export const FLEX_CAPACITY_BACKOFF_MAX_MS = 80_000 as const;
 
 /**
  * Fallback polling schedule intervals in milliseconds:

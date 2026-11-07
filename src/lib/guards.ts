@@ -16,7 +16,9 @@ import {
   MAX_FILE_UPLOAD_BYTES,
   ROW_GUARD_BYTES,
   SQL_MAX_BOUND_PARAMS,
+  TURN_INDEX_MIN,
 } from "../constants.ts";
+import type { TurnIndex } from "../types.ts";
 
 export type SchemaGuardKind =
   | "artifact_bytes"
@@ -170,6 +172,17 @@ export function clampPageLimit(rawLimit?: number | null): number {
     return LIST_PAGE_LIMIT_MAX;
   }
   return truncated;
+}
+
+/**
+ * Validates that a turn index is an integer `>= TURN_INDEX_MIN` (1-based) and
+ * returns it. Throws `RangeError` otherwise; turn `0` never exists.
+ */
+export function assertTurnIndex(value: number, label = "turnIndex"): TurnIndex {
+  if (!Number.isInteger(value) || value < TURN_INDEX_MIN) {
+    throw new RangeError(`${label} must be an integer >= ${TURN_INDEX_MIN}; received ${String(value)}`);
+  }
+  return value;
 }
 
 /**

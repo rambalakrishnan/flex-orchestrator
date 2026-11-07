@@ -305,7 +305,6 @@ CREATE TABLE IF NOT EXISTS turn_candidates (
   structural_status TEXT NOT NULL CHECK (
     structural_status IN (
       'valid',
-      'continuation',
       'trailing_content',
       'missing_tag',
       'malformed_tag',
@@ -831,7 +830,6 @@ export interface TurnRow extends TurnSummaryRow {
 
 export type CandidateStructuralStatus =
   | "valid"
-  | "continuation"
   | "trailing_content"
   | "missing_tag"
   | "malformed_tag"

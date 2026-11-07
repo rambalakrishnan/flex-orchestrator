@@ -183,12 +183,6 @@ export type StructuralClassification =
       readonly rawTag: string;
     }
   | {
-      readonly kind: "continuation";
-      readonly turnIndex: TurnIndex;
-      readonly normalizedText: string;
-      readonly rawTag: string;
-    }
-  | {
       readonly kind: "empty_output";
       readonly reason: "empty" | "whitespace_only" | "marker_only";
     }

@@ -17,6 +17,7 @@ import {
   assertArtifactSize,
   assertBranchSnapshotSize,
   assertFileUploadSize,
+  assertTurnIndex,
   chunkRowsForBindLimit,
   clampPageLimit,
   guardBytes,
@@ -527,5 +528,24 @@ describe("withSqlErrorMapping", () => {
     }
     expect(thrown).toBe(original);
     expect(thrown).not.toBeInstanceOf(StorageFullError);
+  });
+});
+describe("assertTurnIndex", () => {
+  it("accepts integer turn indices >= 1 and returns them", () => {
+    expect(assertTurnIndex(1)).toBe(1);
+    expect(assertTurnIndex(42)).toBe(42);
+    expect(assertTurnIndex(7, "expectedTurnIndex")).toBe(7);
+  });
+
+  it("rejects zero, negatives, and non-integers", () => {
+    for (const value of [0, -1, -42, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => assertTurnIndex(value)).toThrow(RangeError);
+    }
+  });
+
+  it("names the offending label in the error", () => {
+    expect(() => assertTurnIndex(0, "expectedTurnIndex")).toThrow(
+      /expectedTurnIndex must be an integer >= 1/,
+    );
   });
 });

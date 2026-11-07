@@ -36,51 +36,35 @@ import type {
   TurnIndex,
 } from "../types.ts";
 import { cachePayload, reasoningContinuityPayload } from "./continuity.ts";
+import { assertTurnIndex } from "./guards.ts";
 
 /** Canonical terminal completion marker for a given turn index. */
 export const COMPLETION_MARKER_FORMAT = "<!-- TURN_END:{turnIndex} -->";
 
-/** Canonical continuation marker for a given turn index. */
-export const CONTINUATION_MARKER_FORMAT = "<!-- TURN_CONTINUE:{turnIndex} -->";
-
-/**
- * Rejects any turn index that is not an integer `>= 1`.
- *
- * Turn indices are strictly 1-based across storage, requests, and markers.
- */
-function assertPositiveTurnIndex(turnIndex: TurnIndex, operation: string): void {
-  if (!Number.isInteger(turnIndex) || turnIndex < 1) {
-    throw new RangeError(
-      `${operation} requires a 1-based integer turn index; received ${String(turnIndex)}.`,
-    );
-  }
-}
-
 /**
  * Developer instruction placed inside `input` (never the deprecated
  * top-level `instructions` field).
+ *
+ * The model signals only completion. Provider token caps surface as an
+ * incomplete response (`capped`) and are continued by the orchestrator with a
+ * new attempt; there is no intermediate pause marker.
  */
 export function buildDeveloperInstruction(turnIndex: TurnIndex): string {
   const complete = COMPLETION_MARKER_FORMAT.replace("{turnIndex}", String(turnIndex));
-  const cont = CONTINUATION_MARKER_FORMAT.replace("{turnIndex}", String(turnIndex));
   return [
     `You are producing turn ${turnIndex} of a sequential writing job.`,
     "Return only the deliverable text for this turn.",
     `When the turn is complete, end your output with ${complete}.`,
-    `If you need another continuation to finish the same turn, end your output with ${cont} and emit no other marker.`,
-    "Never emit both markers.",
+    "Emit no other marker.",
   ].join(" ");
 }
 
 /** Instruction appended for continuation attempts within the same turn. */
 export function buildContinuationInstruction(turnIndex: TurnIndex): string {
   return [
-    `Continue turn ${turnIndex} from exactly where the previous continuation stopped.`,
+    `Continue turn ${turnIndex} from exactly where the previous response stopped.`,
     "Do not repeat earlier text or restate the prompt.",
-    `End with ${COMPLETION_MARKER_FORMAT.replace("{turnIndex}", String(turnIndex))} when the turn is complete, or ${CONTINUATION_MARKER_FORMAT.replace(
-      "{turnIndex}",
-      String(turnIndex),
-    )} when another continuation is required.`,
+    `End with ${COMPLETION_MARKER_FORMAT.replace("{turnIndex}", String(turnIndex))} when the turn is complete.`,
   ].join(" ");
 }
 
@@ -119,7 +103,7 @@ export type GenerationInputItem = Readonly<Record<string, unknown>>;
 export function buildGenerationInput(
   params: BuildGenerationInputParams,
 ): readonly GenerationInputItem[] {
-  assertPositiveTurnIndex(params.turnIndex, "buildGenerationInput");
+  assertTurnIndex(params.turnIndex, "buildGenerationInput");
 
   const items: GenerationInputItem[] = [
     {
@@ -212,7 +196,7 @@ export function buildGenerationIdempotencyKey(params: {
 export function buildCanonicalGenerationRequest(
   params: CanonicalGenerationRequestParams,
 ): CanonicalGenerationRequest {
-  assertPositiveTurnIndex(params.turnIndex, "buildCanonicalGenerationRequest");
+  assertTurnIndex(params.turnIndex, "buildCanonicalGenerationRequest");
 
   const anchor: ContinuityAnchor | null =
     params.previousResponseId === null

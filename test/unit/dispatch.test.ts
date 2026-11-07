@@ -10,7 +10,6 @@ import {
 } from "../../src/constants.ts";
 import {
   COMPLETION_MARKER_FORMAT,
-  CONTINUATION_MARKER_FORMAT,
   applyRetryAfter,
   buildCanonicalGenerationRequest,
   buildGenerationIdempotencyKey,
@@ -120,7 +119,7 @@ describe("canonical generation request body (§7)", () => {
     const developerText = firstContentItem(developer, "developer").text;
     expect(typeof developerText).toBe("string");
     expect(developerText).toContain(`<!-- TURN_END:${BASE_TURN_INDEX} -->`);
-    expect(developerText).toContain(`<!-- TURN_CONTINUE:${BASE_TURN_INDEX} -->`);
+    expect(developerText).not.toContain("TURN_CONTINUE");
     expect(developerText).not.toContain("<TURN_COMPLETE");
     expect(developerText).not.toContain("<TURN_CONTINUE");
     expect(developerText).not.toContain("[[TURN_");
@@ -223,10 +222,10 @@ describe("canonical generation request body (§7)", () => {
 
     expect(typeof text).toBe("string");
     expect(text).toContain(
-      `Continue turn ${BASE_TURN_INDEX} from exactly where the previous continuation stopped.`,
+      `Continue turn ${BASE_TURN_INDEX} from exactly where the previous response stopped.`,
     );
     expect(text).toContain(`<!-- TURN_END:${BASE_TURN_INDEX} -->`);
-    expect(text).toContain(`<!-- TURN_CONTINUE:${BASE_TURN_INDEX} -->`);
+    expect(text).not.toContain("TURN_CONTINUE");
     expect(text).not.toContain("<TURN_COMPLETE");
     expect(text).not.toContain("<TURN_CONTINUE");
     expect(text).not.toContain(BASE_PROMPT_TEXT);
@@ -283,11 +282,7 @@ describe("canonical generation request body (§7)", () => {
 describe("canonical marker dialect", () => {
   it("exports comment-style markers with a {turnIndex} placeholder", () => {
     expect(COMPLETION_MARKER_FORMAT).toBe("<!-- TURN_END:{turnIndex} -->");
-    expect(CONTINUATION_MARKER_FORMAT).toBe("<!-- TURN_CONTINUE:{turnIndex} -->");
     expect(COMPLETION_MARKER_FORMAT.replace("{turnIndex}", "3")).toBe("<!-- TURN_END:3 -->");
-    expect(CONTINUATION_MARKER_FORMAT.replace("{turnIndex}", "3")).toBe(
-      "<!-- TURN_CONTINUE:3 -->",
-    );
   });
 
   it("never emits angle-bracket or bracket marker forms", () => {
@@ -424,7 +419,7 @@ describe("generation idempotency keys (§7)", () => {
 describe("Flex capacity backoff (§10)", () => {
   it("persists bounded exponential backoff for sends zero through four", () => {
     expect(FLEX_CAPACITY_BACKOFF_BASE_MS).toBe(5_000);
-    expect(FLEX_CAPACITY_BACKOFF_MAX_MS).toBe(300_000);
+    expect(FLEX_CAPACITY_BACKOFF_MAX_MS).toBe(80_000);
     expect(computeCapacityBackoffMs(0)).toBe(5_000);
     expect(computeCapacityBackoffMs(1)).toBe(10_000);
     expect(computeCapacityBackoffMs(2)).toBe(20_000);

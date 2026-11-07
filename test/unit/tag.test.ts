@@ -7,7 +7,6 @@ import {
   classifyCandidateOutcome,
   classifyCandidateOutput,
   formatCompletionTag,
-  formatContinuationTag,
   isJudgeableClassification,
   normalizeDeliverableText,
 } from "../../src/lib/tag.ts";
@@ -17,17 +16,11 @@ import type {
 } from "../../src/lib/tag.ts";
 
 const TERMINAL_1 = "<!-- TURN_END:1 -->";
-const CONTINUE_1 = "<!-- TURN_CONTINUE:1 -->";
 
 describe("canonical tag formatting", () => {
   it("formats the canonical HTML-comment terminal marker", () => {
     expect(formatCompletionTag(1)).toBe(TERMINAL_1);
     expect(formatCompletionTag(42)).toBe("<!-- TURN_END:42 -->");
-  });
-
-  it("formats the canonical HTML-comment continuation marker", () => {
-    expect(formatContinuationTag(1)).toBe(CONTINUE_1);
-    expect(formatContinuationTag(7)).toBe("<!-- TURN_CONTINUE:7 -->");
   });
 });
 
@@ -81,7 +74,6 @@ describe("empty_output classification", () => {
   it("classifies marker-only output as empty_output/marker_only even with a valid marker", () => {
     for (const rawOutputText of [
       TERMINAL_1,
-      `  ${CONTINUE_1}\n`,
       formatCompletionTag(1),
     ]) {
       const outcome = classifyCandidateOutcome({
@@ -230,7 +222,7 @@ describe("wrong_index, missing_tag, and malformed_tag classification", () => {
     ["missing index", "<!-- TURN_END -->", "Malformed turn marker"],
     [
       "conflicting markers",
-      `foo<!-- TURN_END:1 -->${CONTINUE_1}`,
+      `foo<!-- TURN_END:1 --><!-- TURN_END:2 -->`,
       "Conflicting turn markers",
     ],
   ])("classifies %s as malformed_tag", (_label, rawOutputText, reasonFragment) => {
@@ -254,36 +246,6 @@ describe("wrong_index, missing_tag, and malformed_tag classification", () => {
     if (classification.kind === "malformed_tag") {
       expect(classification.normalizedText).toBe("  foo\n\n  bar");
     }
-  });
-});
-
-describe("continuation classification", () => {
-  it("classifies a matching continuation marker as continuation", () => {
-    const classification = classifyCandidateOutput({
-      rawOutputText: `foo${CONTINUE_1}`,
-      expectedTurnIndex: 1,
-    });
-    expect(classification).toEqual({
-      kind: "continuation",
-      turnIndex: 1,
-      normalizedText: "foo",
-      rawTag: CONTINUE_1,
-    });
-    expect(isJudgeableClassification(classification)).toBe(false);
-  });
-
-  it("classifies a continuation marker for another turn as wrong_index", () => {
-    const classification = classifyCandidateOutput({
-      rawOutputText: `foo<!-- TURN_CONTINUE:3 -->`,
-      expectedTurnIndex: 1,
-    });
-    expect(classification).toEqual({
-      kind: "wrong_index",
-      expectedTurnIndex: 1,
-      actualTurnIndex: 3,
-      normalizedText: "foo",
-      rawTag: "<!-- TURN_CONTINUE:3 -->",
-    });
   });
 });
 
@@ -426,16 +388,6 @@ describe("classifyCandidateOutcome mapping table", () => {
       judgeRequired: true,
       warnings: [],
       classificationKind: "terminal",
-    },
-    {
-      label: "continuation",
-      params: { rawOutputText: `foo${CONTINUE_1}`, expectedTurnIndex: 1 },
-      structuralStatus: "continuation",
-      turnStatus: "running",
-      attemptStatus: "completed",
-      judgeRequired: false,
-      warnings: [],
-      classificationKind: "continuation",
     },
     {
       label: "trailing_content with retained text",

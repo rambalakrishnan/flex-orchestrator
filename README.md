@@ -8,25 +8,20 @@ This Worker orchestrates long-running OpenAI Responses generation jobs with Flex
 - `REGISTRY_DO` — global job index, file catalogue, uploads, and retention.
 - `ROUTER_DO` — response routing and durable webhook inbox.
 
-The application hostname is protected by Cloudflare Access. The webhook hostname is public and authenticated by signature.
+The application hostname is protected by Cloudflare Access. The webhook hostname is public and authenticated by signature. The Worker is only reachable on the custom domains you attach in the Cloudflare Dashboard; `workers.dev` and preview URLs are disabled.
 
 ## Quick Start
 
 ### 1. Configure `wrangler.toml`
 
-Replace `app.example.com` and `hooks.example.com` with your hostnames.
+This file is safe to commit to a public repository. It contains no secrets and no environment-specific hostnames.
 
 ```toml
-name = "oai-orchestrator"
+name = "flex-orchestrator"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
 workers_dev = false
 preview_urls = false
-
-routes = [
-  { pattern = "app.example.com", custom_domain = true },
-  { pattern = "hooks.example.com", custom_domain = true }
-]
 
 [assets]
 directory = "./public"
@@ -51,7 +46,12 @@ new_sqlite_classes = ["JobDO", "RouterDO", "RegistryDO"]
 
 [vars]
 FILE_RETENTION_SECONDS = "604800"
-JUDGE_DEFAULT_MODEL = "gpt-5-mini"
+JUDGE_DEFAULT_MODEL = "your-judge-model"
+
+[secrets]
+required = [
+  "HOOKS_HOST"
+]
 ```
 
 `FILE_RETENTION_SECONDS` controls file cleanup retention. `JUDGE_DEFAULT_MODEL` seeds the judge panel’s model field.
@@ -72,20 +72,39 @@ Set the judge credential named in each job’s judge configuration, using that c
 
 ## Infrastructure Setup
 
-1. **Create the Cloudflare Access application for the app hostname.**
-   - Protect `app.example.com` with a self-hosted Access application and an operator policy.
-   - Do **not** put `hooks.example.com` behind Access. OpenAI must reach it directly.
+### 1. Attach custom domains
 
-2. **Confirm hostname routing.**
-   - Worker-first routing separates the Access-protected application from the public webhook endpoint.
-   - Keep `workers_dev` and preview URLs disabled. Unexpected hosts, `workers.dev`, and preview URLs must not expose the application.
-   - State-changing browser requests require the application origin.
+Because `wrangler.toml` deliberately omits `routes`, Wrangler deploys the Worker without attaching domains. Attach them once in the Cloudflare Dashboard.
 
-3. **Register the OpenAI webhook.**
-   - OpenAI dashboard → Webhooks → add endpoint: `https://hooks.example.com/openai`
-   - Subscribe to: `response.completed`, `response.cancelled`, `response.failed`, `response.incomplete`.
-   - Store the signing secret as `OPENAI_WEBHOOK_SECRET`.
-   - Webhooks authenticate exact raw bytes and enforce a 300-second delivery-timestamp tolerance. Acknowledgement follows durable inbox acceptance.
+1. Go to **Workers & Pages → flex-orchestrator → Settings → Domains & Routes**.
+2. Click **Add → Custom Domain** and enter your application hostname, for example `app.example.com`.
+3. Click **Add → Custom Domain** and enter your webhook hostname, for example `hooks.example.com`.
+4. Confirm both hostnames appear under **Custom Domains and Routes**.
+
+The Worker is now only reachable on these two hostnames. `workers.dev` and preview URLs remain disabled.
+
+### 2. Configure the webhook host variable
+
+Add a runtime variable so the Worker can distinguish the public webhook from the Access-protected application.
+
+1. Go to **Workers & Pages → flex-orchestrator → Settings → Variables**.
+2. Add a new variable: **Name** `HOOKS_HOST`, **Value** `hooks.example.com` (your webhook hostname).
+3. Save and redeploy if prompted.
+
+The Worker treats `HOOKS_HOST` as the public webhook ingress and every other reachable host as the application. Because only the two custom domains above reach the Worker, unexpected hosts cannot expose the application.
+
+### 3. Protect the application hostname with Cloudflare Access
+
+1. In **Cloudflare Zero Trust → Access → Applications**, create a self-hosted application for `app.example.com` with an operator policy.
+2. Do **not** put `hooks.example.com` behind Access. OpenAI must reach it directly.
+3. Confirm that an unauthenticated request to `app.example.com` is redirected to the Access login, while `hooks.example.com/openai` remains reachable without an Access JWT.
+
+### 4. Register the OpenAI webhook
+
+1. In the OpenAI dashboard, go to **Webhooks** and add an endpoint: `https://hooks.example.com/openai`.
+2. Subscribe to: `response.completed`, `response.cancelled`, `response.failed`, `response.incomplete`.
+3. Store the signing secret as `OPENAI_WEBHOOK_SECRET`.
+4. Webhooks authenticate exact raw bytes and enforce a 300-second delivery-timestamp tolerance. Acknowledgement follows durable inbox acceptance.
 
 ## Using the UI
 
@@ -152,8 +171,10 @@ The judge panel defaults to stateless history, and saved jobs carry explicit his
 
 | Symptom | What to check / do |
 | :--- | :--- |
-| Webhook returns `401` or `403` | Signature mismatch, wrong `OPENAI_WEBHOOK_SECRET`, or timestamp outside the 300-second tolerance. Verify exact raw bytes and clock. |
+| Webhook returns `401` or `403` | Signature mismatch, wrong `OPENAI_WEBHOOK_SECRET`, or timestamp outside the 300-second tolerance. Verify exact raw bytes and clock. Confirm `HOOKS_HOST` matches the hostname OpenAI calls. |
 | Webhook accepted but job does not advance | Check RouterDO inbox and response mapping. Unmatched webhook events remain available for registration races. Duplicate and late results retain accounting without reopening settled execution decisions. |
+| App hostname is reachable without Access | Confirm the Access self-hosted application covers `app.example.com` and is not bypassed. Confirm `HOOKS_HOST` is set to the webhook host, not the app host. |
+| Unexpected hostname reaches the app | Confirm only the two custom domains are attached under **Domains & Routes** and that `workers_dev` and `preview_urls` are disabled. |
 | Judge result is `UNKNOWN` | Judge infrastructure error or unencodable declared contract. Check declared transport, history mode, file-delivery mode, model, secret name, API root, and response shape. A structurally valid candidate advances with a warning. |
 | Turn stalls | Check Flex capacity backoff. Ambiguous generation dispatches pause for manual recovery through a fresh attempt and key. Fallback polling follows the five-minute, one-minute, five-minute schedule with a 24-probe bound. |
 | Candidate is empty | Whitespace-only and marker-only output is `empty_output` and never reaches the judge. Start a fresh run if an automatic retry remains; otherwise fail. |

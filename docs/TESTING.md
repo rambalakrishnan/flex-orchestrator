@@ -1,0 +1,332 @@
+# TESTING.md
+
+## Overview
+This document defines how to verify the Worker against `ARCHITECTURE.md`. It covers automated tests (unit, integration, and Durable Object) plus the manual checks that cannot be fully automated (Cloudflare Access wiring, OpenAI webhook registration, real Flex capacity behavior).
+
+Tests are organized by architecture concern. Each numbered item below is a verification obligation, not a single test case; a well-written test file may satisfy several items, and each item should have at least one direct assertion.
+
+**Authoritative references:**
+- §2 — deployment topology
+- §6 — canonical generation request
+- §7 — empty-output classification
+- §8A — joint recovery procedure
+- §11 — file storage
+- §12 — artifact storage and export
+- §16 — topology and dependency DAG
+
+## Prerequisites and setup
+- Node.js with `npm`
+- `npx wrangler` authenticated to a non-production account for manual verification
+- Local test bindings for `JOB_DO`, `ROUTER_DO`, `REGISTRY_DO` (see `wrangler.toml`)
+- A fixture `OPENAI_API_KEY` for provider-IO tests that must not hit the real API
+- A fixture `OPENAI_WEBHOOK_SECRET` for signature tests
+- For manual checks only: a real Cloudflare account with Access, a real OpenAI project with webhooks, and a real judge provider credential
+
+Recommended stack: `vitest` with `@cloudflare/vitest-pool-workers` so Durable Objects, `fetch`, and `waitUntil` behave like production.
+
+## Running tests
+```bash
+npm install
+npm test              # unit + integration
+npm run test:watch    # watch mode
+npm run test:do       # Durable Object tests
+npm run test:coverage # coverage report
+```
+Tests must never call the real OpenAI, judge, or Cloudflare APIs.
+
+## Test organization
+```text
+test/
+├── unit/
+│   ├── tag.test.ts
+│   ├── signature.test.ts
+│   ├── continuity.test.ts
+│   ├── dispatch.test.ts
+│   ├── judge.test.ts
+│   ├── tokens.test.ts
+│   ├── guards.test.ts        # pure guard functions, no real bytes
+│   └── alarm.test.ts
+├── integration/
+│   ├── http.test.ts
+│   ├── handlers-jobs.test.ts
+│   ├── handlers-files.test.ts
+│   ├── handlers-tokens.test.ts
+│   ├── handlers-webhook.test.ts
+│   └── generation-recovery.test.ts
+├── do/
+│   ├── job-do.test.ts
+│   ├── registry-do.test.ts
+│   └── router-do.test.ts
+├── db/
+│   ├── schema.test.ts
+│   ├── migrations.test.ts
+│   ├── job-storage.test.ts
+│   └── router-storage.test.ts
+└── fixtures/
+    ├── requests.ts
+    ├── jobs.ts
+    ├── files.ts
+    └── judge.ts
+```
+Each test file states which verification items it covers in a top-of-file comment (`// Covers: 7, 8, 9`), so reviewers can audit coverage against this document.
+
+## Workerd and `vitest-pool-workers` patterns
+These are the environment-specific idioms that all DO tests must follow.
+
+### Intercepting outbound `fetch`
+Node HTTP interceptors and `setupServer` from MSW do not patch `fetch` inside workerd. Intercept with `vi.stubGlobal('fetch', ...)` and dispatch by URL, or inject a fetch implementation into the `ProviderIO` seam and swap it per test. When you stub globally, filter by hostname so unrelated requests still fail loudly.
+
+Assertions against outbound generation requests must compare the stored request bytes, not a reconstructed object. Stub `fetch`, capture the body as `arrayBuffer()`, and compare against the canonical-request builder output.
+
+### Driving Durable Object alarms
+Do not wait for real time and do not use `vi.useFakeTimers()` against the DO clock. Use `runDurableObjectAlarm(stub)` from `cloudflare:test` to fire a scheduled alarm synchronously and assert it ran. Use `runInDurableObject(stub, async (instance, state) => { ... })` to inspect state before and after.
+
+Alarm handlers must depend on persisted deadlines, not `Date.now()`. Tests manipulate persisted deadlines (or the work records that produce them) and then fire the alarm. This makes backoff, fallback polling, and retention deletion deterministic.
+
+**Crucial:** Durable Object alarms are not reset between test runs and do not respect isolated storage. Every test that schedules an alarm must either run it with `runDurableObjectAlarm()` or delete it before the test finishes, or it will bleed into the next test.
+
+### SQLite transactions are synchronous
+Cloudflare Durable Object SQLite transactions (`state.storage.transactionSync()`) are synchronous. You cannot `await` inside them; the TypeScript compiler will reject it, and the runtime will throw if you bypass the compiler. Therefore:
+- Do not attempt to test “throw from a stubbed `fetch` inside a transaction.” The stubbed `fetch` returns a Promise; the transaction block closes before it can run.
+- Do assert transaction atomicity by throwing a **synchronous** error inside the block and checking that all statements in that block rolled back.
+- Do assert transaction purity structurally: inspect the transaction’s call graph in review (or via a lint rule) to ensure no `fetch`, `setTimeout`, `await`, or other asynchronous/IO calls appear inside any `transaction*` callback. This is a code-review obligation, not a runtime test.
+
+### Controlling clock and randomness
+`vi.setSystemTime()` does not reliably affect the DO clock in workerd. Design code so that time-sensitive behavior is driven by persisted deadlines and deterministic inputs:
+- Idempotency keys derive from stable inputs (job ID, turn index, attempt index), not `crypto.randomUUID()` called mid-test.
+- Retry counts and attempt indices are persisted and read back, not inferred from wall-clock deltas.
+- Where jitter is required (e.g., Flex backoff), inject a seedable RNG so backoff timestamps are deterministic and assertable.
+- If a module must call `Date.now()`, wrap it (`lib/clock.ts`) so tests can substitute it. Do not call `Date.now()` directly inside DO handlers that must be tested deterministically.
+
+### `waitUntil` and test completion
+Do not rely on `waitUntil` to finish before the test completes. Create an `ExecutionContext` with `createExecutionContext()` and pass it to the handler under test. Before asserting side effects, call `await waitOnExecutionContext(ctx)` to settle every promise passed to `ctx.waitUntil()`. Background tasks must not bleed into the next test.
+
+### Test isolation and Durable Object teardown
+`@cloudflare/vitest-pool-workers` provides **per-file** isolated storage. Tests within the same file share a storage environment. You must handle per-test state bleed explicitly.
+
+Use `reset()` and `abortAllDurableObjects()` from `cloudflare:test` in an `afterEach` hook:
+
+```ts
+import { reset, abortAllDurableObjects } from "cloudflare:test";
+import { afterEach } from "vitest";
+
+afterEach(async () => {
+  // 1. Settle or clear alarms first. Alarms do not respect isolated storage
+  //    and are not cleared by reset(). If a test scheduled an alarm,
+  //    run it with runDurableObjectAlarm() or delete it explicitly here.
+
+  // 2. Wipe all storage bindings (KV, R2, D1, DO SQLite) and reset instances
+  await reset();
+
+  // 3. Evict running instances from memory
+  await abortAllDurableObjects();
+});
+```
+
+- **Do not manually `DROP TABLE` as a teardown strategy.** `reset()` removes the entire SQLite database content.
+- **Do not use fresh Durable Object IDs as the primary isolation mechanism.** Per-file isolation plus `reset()` is the supported pattern. Reserve explicit schema resets or fixed IDs for migration tests.
+- **Do not call `stub.deleteAll()`.** `deleteAll()` is a method on `DurableObjectStorage`, not on `DurableObjectStub`. Use `reset()`, or `runInDurableObject(stub, (instance, state) => state.storage.deleteAll())` when you must target one object.
+- **Alarm nuance:** `deleteAll()` clears an active alarm only for Workers with compatibility date `2026-02-24` or later. `reset()` avoids that specific question by wiping the binding, but the known-issue still applies: alarms are never reset between test runs, so schedule-then-settle in every test regardless of which helper you use.
+- **Eviction helpers are separate:** `evictDurableObject(stub, options?)` and `evictAllDurableObjects()` test eviction behavior; they wait for in-flight requests to drain and hibernate WebSockets by default. Do not use them as a storage-reset substitute.
+
+## Verification suite
+
+### Routing and security
+**1. Worker-first hostname routing.** With `workers_dev = false` and `preview_urls = false`, requests to `workers.dev`, preview URLs, and unexpected `Host` values must not reach the application. `app.example.com` reaches the application behind Access; `hooks.example.com` reaches only the webhook ingress. Cover: `src/index.ts` hostname dispatch, `src/handlers/webhook.ts` mount.
+
+**2. Browser-origin enforcement and secret hygiene.** State-changing browser requests without the application `Origin` are rejected. Stored request bodies, logs, and exports never contain credential values; authorization headers are resolved at call time only. Model output is emitted as text or sanitized Markdown (no raw HTML injection). Cover: `src/http.ts`, `src/do/job-do.ts`, `src/lib/openai.ts`, `public/app.js`.
+
+### Files and storage
+**3. Files API contract.** Uploads use `purpose: "user_data"` and produce `file_id` references; inline text, base64, and `file_url` are rejected at the submission interface. Uploads are bounded to **16,000,000 file bytes**; multipart parsing, buffering, and hashing remain bounded. Test multipart parsing and hashing at a small size; include exactly one integration test at the 16,000,000 / 16,000,001 boundary using `new Uint8Array(N)` (not a string) to avoid encoding overhead. Cover: `src/handlers/files.ts`, `src/do/registry-do.ts`.
+
+**4. Upload dedupe and intent recovery.** Identical content hashes deduplicate source uploads. Ambiguous or redundant upload intents are recoverable and cleanable. Cover: `src/do/registry-do.ts`.
+
+**5. File reference protection and retention.** Non-terminal file references are protected before a job becomes ready. RegistryDO periodically deletes retention-eligible files that no non-terminal job references. Drive the retention alarm with `runDurableObjectAlarm` and assert deletion against the catalogue. Cover: `src/do/registry-do.ts`, `src/db/jobs.ts`, `src/lib/alarm.ts`.
+
+**6. Artifact guards.** Every artifact and every resulting row independently enforce the **1,500,000-byte** guard, including encoded file bytes inside retained inline judge requests. Oversized artifacts produce explicit errors; nothing is truncated. Test the pure guard function exhaustively with `{ size: N }` mocks; include exactly one integration test per guard boundary (1,500,000 / 1,500,001) to verify wiring. Do not allocate real 1.5 MB payloads for every insert test. Cover: `src/db/schema.ts`, `src/do/job-do.ts`.
+
+**6a. Schema and migration validation.** The architecture mandates explicit migration tables (no `PRAGMA user_version`). Cover:
+- **Schema DDL validation:** Run the actual `CREATE TABLE` DDL from `src/db/schema.ts` against an empty SQLite-backed DO. Assert no syntax errors. Insert a mock row into every table and verify constraints, `NOT NULL` columns, and `STRICT` mode behavior.
+- **Migration idempotency:** Run the migration script against an empty database; assert the `_sql_schema_migrations` table exists and records each applied migration by ID. Run the script a second time; assert it applies zero new migrations and does not recreate tables.
+- **Partial migration rollback:** Throw a synchronous error mid-migration and assert the migration record is unapplied and no half-created tables remain visible to a subsequent run.
+- **Migration ordering:** Assert migrations run by migration ID, not by file mtime.
+Cover: `src/db/schema.ts`, `test/db/migrations.test.ts`, `test/db/schema.test.ts`.
+
+### Generation
+**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, legacy `24h`, `nocache`, places developer messages in `input` (not `instructions`), and uses exact canonical-request counting.
+
+Long-context classification test points, using mocked counts:
+- **271,999** → not long-context
+- **272,000** → not long-context (boundary; spec says *above* 272,000)
+- **272,001** → long-context
+Assert that cached input counts toward the threshold.
+
+Idempotency-Key assertions:
+- Assert that an `Idempotency-Key` header is present on every generation dispatch.
+- Send the same attempt twice and assert the exact same key is used on both sends. A different key on retry is a bug.
+- Assert that a new attempt (attempt index incremented) produces a new key.
+Cover: `src/lib/dispatch.ts`, `src/db/attempts.ts`.
+
+**8. Shared continuity helper.** Generation and judge obtain continuity fields from the same helper; neither adapter re-implements the §2 stateful/stateless rule. Parametrize the helper over `{ stateful, stateless } × { anchor present, absent }` and assert both adapters consume its output verbatim. **Assert the serialized payload:** stateful must contain `previous_response_id` (if anchored) and must *not* contain `include`. Stateless must contain `include: ["reasoning.encrypted_content"]` and must *not* contain `previous_response_id`. Cover: `src/lib/continuity.ts` plus both adapters.
+
+**9. Cumulative assembly, structural classification, and precedence.** Cumulative text concatenates the active run’s extracted deliverable across continuations, including tags split across continuation boundaries. Structural evaluation runs on cumulative text. Precedence is fixed: **provider failure, cancellation, and refusal handling take precedence over empty-output classification**, and **`empty_output` never reaches the judge**. Cover at minimum:
+- `""`, `"   "`, `"\n\n"`, `"\t"` → `empty_output`; no judge call
+- `"<!-- done -->"` → `empty_output`; no judge call
+- `"<!-- done --><!-- done -->"` → `empty_output`; no judge call
+- `"foo<!-- done -->"` → accepted candidate; judge called; trailing content absent
+- `"<!-- done -->foo"` → **`trailing_content`** structural outcome: `foo` is truncated from the exported text, the judge is not asked to evaluate trailing bytes as deliverable, and a structural warning is passed to the judge (or to the recovery path per §8A).
+- `"foo<!-- done -->bar"` → `trailing_content`; `foo` retained, `bar` truncated with warning
+- Tag split across continuations (`"<do"` + `"ne>"`) → single tag recognized; classification matches the joined output
+- Provider error part returned alongside text → provider path; not `empty_output`; not judge
+- **Refusal part returned alongside text → refusal path; not `empty_output`; the judge is not invoked.** Assert via `judge` spy: zero calls.
+- Cancellation observed alongside text → cancellation path; not `empty_output`; judge not invoked
+Cover: `src/lib/tag.ts`, `src/do/job-do.ts`.
+
+**10. Recovery budgets and dispatch fences.** Automatic recovery budgets are fixed at job creation, cumulative per turn, and default to three continuations and one full retry. Manual retries do not reset automatic counters. Ambiguous dispatches pause for a fresh attempt and idempotency key. Flex backoff is persisted and bounded to five sends per attempt; assert exactly five sends then pause. Fallback polling follows the five-minute, one-minute, five-minute schedule with a 24-probe bound; drive each step with `runDurableObjectAlarm` against persisted deadlines. Attempt indices increase monotonically and are never reused.
+*Integration loop:* Mock the OpenAI client to return a marker-only response on attempt 1, and a valid response on attempt 2. Assert the run reaches the configured maximum limit (defaulting to three continuations and one full retry) and either completes or fails at the boundary without exceeding the ceiling.
+*(Note: This test belongs in `test/integration/generation-recovery.test.ts`)*
+Cover: `src/lib/dispatch.ts`, `src/lib/alarm.ts`, `src/db/attempts.ts`.
+
+### Judge
+**11. Declared-capability handling.** Judge capability declarations are operator-authoritative. The adapter performs no runtime capability detection and no silent substitution; inconsistencies produce advisory warnings; an unencodable declared contract produces `UNKNOWN` rather than an invented capability. Specifically:
+- Chat Completions declared stateful → warning; assert the outbound request contains no `previous_response_id` and no other invented stateful field.
+- Passthrough with a non-OpenAI API root → permitted.
+- Unencodable declared contract → `UNKNOWN`, **and** the request is not sent with the offending field dropped.
+Cover: `src/lib/judge.ts`.
+
+**12. History-aware file delivery.** Stateful judge history attaches each applicable file once and inherits its context on later calls; assert the second call omits inherited attachments. Stateless requests attach files per represented turn; `includePrior` adds prior accepted-output blocks and their applicable files. Files are deduplicated within a request. Cover at minimum:
+- Stateful: call 1 attaches file; call 2 omits it as inherited.
+- Stateful **failure before response-ID commit**: call 1’s outbound request fails or is cancelled before the response ID is recorded. Assert call 2 attaches the file again, because the chain was never established.
+- Stateful failure **after response-ID commit but before delivery ack**: assert the attachment decision matches persisted chain state, not assumed success.
+- Stateless with `includePrior`: files for prior accepted-output blocks appear once per request; dedupe holds.
+- Duplicate file IDs across turns in one request: attached once.
+Cover: `src/lib/judge.ts`.
+
+**13. Manifest and `file_visibility`.** The manifest distinguishes delivered-now, inherited, and withheld files across all applicable files. Boolean `file_visibility` reports complete applicable-file coverage versus any missing coverage. Assert `file_visibility` is derived from coverage, not from `manifest.deliveredNow`. Cover: `src/lib/judge.ts`.
+
+**14. Judge output shape.** Judge output validation accepts exactly verdict, grade, comment, tag agreement, and boolean file visibility — nothing else. Explicitly test the validation parser by passing JSON with 4 fields, 6 fields, extra properties, and wrong types. Assert the parser rejects them before they hit the database. Cover: `src/lib/judge.ts`.
+
+**15. Judge audit records.** Audit records retain the request, extracted message body, IDs, usage, diagnostics, and required continuity items, and not a redundant response envelope. Judge history and response IDs remain separate from generation history. Cover: `src/db/attempts.ts`, `src/lib/judge.ts`.
+
+**16. Judge outcome branching.** Judge infrastructure failure accepts an otherwise valid candidate with a warning. Valid rejection, excessive grade, or judge-only tag disagreement pauses a structurally valid candidate for review; judge-only tag disagreement is distinct from parser-confirmed `wrong_index`. Incomplete file visibility on an otherwise passing result accepts with a coverage warning. Storage and artifact-guard errors pause or fail explicitly. Accept-with-warning uses the ordinary acceptance transition and preserves the original judge result. Operator acceptance does not bypass structural validity, admission, refusal handling, or artifact guards. Cover: `src/do/job-do.ts`, `src/lib/judge.ts`, `src/handlers/jobs.ts`.
+
+**17. Judge feedback isolation.** Judge feedback never enters generation input automatically. Assert this by constructing the next generation request after a judge rejection and diffing it against a request built without any judge interaction; the judge text must not appear. Cover: `src/do/job-do.ts` plus canonical-request builder assertions.
+
+### Webhooks
+**18. Webhook durability, ordering, and signature concatenation.** Signature verification operates on exact raw bytes with a 300-second delivery-timestamp tolerance. Acknowledgement follows durable inbox acceptance. Response mappings are immutable; unmatched events remain available for registration races. Duplicate and late results retain usable accounting observations without reopening settled execution decisions.
+
+Signature tests must exercise the Standard Webhooks concatenation, not just independent tampering. The signed string is `webhook-id + "." + webhook-timestamp + "." + raw-body` under HMAC with the shared secret. Cover:
+- **Baseline valid:** all three fields intact, signature matches.
+- **Body tampered:** change one byte of raw body; signature fails; inbox untouched.
+- **Timestamp tampered:** valid signature for a different timestamp; fails.
+- **`webhook-id` tampered:** body and timestamp unchanged, `webhook-id` changed, signature fails. This is the case that catches missing concatenation of the ID.
+- **Timestamp outside tolerance:** valid signature for a timestamp older than 300 seconds; fails.
+- **Raw-byte fidelity:** a body that is byte-identical but whose JSON serialization differs (whitespace, key order) verifies only if the exact raw bytes are hashed.
+
+Delivery-race and ordering tests:
+- **Duplicate delivery:** inject `response.completed` twice for the same response ID; assert the turn is accepted exactly once and usage is recorded once.
+- **Out-of-order terminal events:** inject `response.failed` then a delayed `response.completed` for the same response ID; assert the settled execution decision is not reopened and accounting observations for both are retained.
+- **Pre-mapping race:** inject an event before the response mapping exists; assert it stays in the inbox and resolves once the mapping is registered.
+- **Late event for a superseded execution:** inject a terminal event for an attempt that was superseded; assert no state change and accounting retention.
+Cover: `src/lib/signature.ts`, `src/handlers/webhook.ts`, `src/do/router-do.ts`, `src/db/router.ts`.
+
+### Exports
+**19. Streaming exports.** Exports stream pages and one artifact at a time, remain available in every job state, and capture the Markdown accepted-prefix boundary at export start. JSON exports include encoded file bytes only when those bytes occur in a retained inline judge request; exports do not fetch source files or attach separate copies. Credentials are never exported. Missing artifacts produce explicit markers. Cover: `src/handlers/jobs.ts`.
+
+**20. Live JSON export semantics.** A live JSON export records its starting revision and table high-water keys; each emitted mutable record carries its observed revision or update time; records created beyond the captured high-water keys are excluded. It does not claim atomic-backup semantics. Drive this by capturing a revision, writing new records mid-stream, and asserting exclusion. Cover: `src/handlers/jobs.ts`, `src/db/jobs.ts`.
+
+### Branching
+**21. Branch invariants and superseding race.** Branch initialization consumes a complete Worker-supplied snapshot in one local transaction. Activation follows file protection and conditional superseding of the quiescent parent. Snapshots are bounded to **8,000,000 encoded bytes**; test the pure guard with mocked sizes and include one integration test at 8,000,000 / 8,000,001. Copied history preserves call provenance and remains inherited rather than new branch spend. Cover at minimum:
+- Happy path: quiescent parent, protected files, snapshot < 8 MB → child activates.
+- Snapshot over 8,000,000 → explicit error, no activation.
+- **Superseding race:** create the child snapshot while the parent is quiescent, then, before child activation, advance the parent’s execution epoch (simulate a resume/retry on the parent). Assert child activation aborts safely, does not partially claim the parent, and cleans up any child-created files or references. The parent remains the active job.
+- **File-protection race:** attempt child activation before parent file protection completes; assert activation is refused rather than racing retention.
+Cover: `src/handlers/jobs.ts`, `src/do/job-do.ts`, `src/db/jobs.ts`.
+
+### Accounting
+**22. Usage and pricing.** Usage is recorded once per call and includes discarded, partial, failed, and cancelled work when known. Missing usage and unknown pricing remain explicit rather than estimated. Pricing uses per-request rate cards and does not infer cache-write premiums from TTL. Cover: `src/lib/tokens.ts`, `src/db/attempts.ts`.
+
+### Lists and pagination
+**23. List contract.** Lists use primary-key cursors, omit BLOBs, and clamp page limits to 1–100. Cover: `src/handlers/jobs.ts`, `src/handlers/files.ts`.
+
+### Durable Object invariants
+**24. Alarm, transaction, and side-effect invariants.** Each Durable Object uses one alarm scheduled against its earliest obligation or deadline; assert by inspecting the scheduled alarm time via `runInDurableObject` after state changes. `waitUntil` accelerates persisted work but never supplies its only execution guarantee. Cover at minimum:
+- **Transaction atomicity (synchronous only):** throw a synchronous error inside `state.storage.transactionSync()` and assert all statements in the block roll back. Do not attempt to `await` inside the transaction.
+- **Transaction purity (structural):** code review obligation plus a lint rule (`no-restricted-syntax` on `AwaitExpression`, `CallExpression` matching `fetch`/`setTimeout`/`setInterval`, and `ImportExpression` inside `state.storage.transaction*` callbacks).
+- **Prepare–perform–reconcile:** external side effects and execution-authorizing calls go through durable prepare–perform–reconcile; assert a durable record exists before the side effect and that the reconcile step resolves ambiguous outcomes on replay.
+- **Command acknowledgement:** acknowledgements follow durable state or work obligations, not uncommitted background promises. Assert by killing the background promise (stubbed to reject) and confirming the acknowledgement still reflects persisted state.
+- **Fencing:** revision, execution epoch, and work-claim sequence serve distinct ordering and fencing purposes. Assert that a stale-epoch write is rejected and that a superseding operation bumps the epoch.
+Cover: `src/do/*.ts`, `src/db/*.ts`, `src/lib/alarm.ts`.
+
+## Manual verification
+These checks exercise real Cloudflare and OpenAI infrastructure and cannot be fully automated. Run them once per deployment change and after any `wrangler.toml` edit.
+
+### Deployment and routing
+- [ ] `workers.dev` and preview URLs are unreachable for the application hostname.
+- [ ] `app.example.com` is reachable only through Cloudflare Access; unauthenticated requests are redirected to the Access login.
+- [ ] `hooks.example.com` is reachable without Access; other paths on that hostname return 404.
+- [ ] State-changing browser requests from a foreign origin are rejected.
+
+### OpenAI webhook registration
+- [ ] OpenAI dashboard → Webhooks lists `https://hooks.example.com/openai` with the four subscriptions.
+- [ ] A test event from the OpenAI dashboard is acknowledged by RouterDO (inbox record created).
+- [ ] A request with a deliberately corrupted signature returns `401`/`403` and does not enqueue an inbox record.
+- [ ] A request whose delivery timestamp is outside the 300-second tolerance is rejected.
+- [ ] A request with a tampered `webhook-id` (body and timestamp valid) is rejected.
+
+### Files and retention
+- [ ] A source upload at the 16,000,000-byte bound succeeds; at 16,000,001 bytes it fails with an explicit error.
+- [ ] An artifact that would exceed the 1,500,000-byte guard produces an explicit error, not truncated output.
+- [ ] After `FILE_RETENTION_SECONDS` elapses on an unreferenced file, RegistryDO deletes it.
+
+### Generation
+- [ ] A real Flex job reaches completion with `service_tier: "flex"` and never falls back to standard.
+- [ ] A deliberately induced `empty_output` (marker-only) starts a fresh run when budget remains, and fails otherwise without invoking the judge.
+- [ ] A Flex capacity outage drives persisted backoff and, if sustained, pauses for manual recovery.
+
+### Judge
+- [ ] A declared OpenAI stateful passthrough judge accepts a candidate without warning when capabilities align.
+- [ ] A declared Chat Completions stateful judge produces an advisory warning (not a substitution).
+- [ ] A judge infrastructure failure accepts with a warning; the original judge result is preserved.
+- [ ] A judge that reports `file_visibility: false` on an otherwise passing result accepts with a coverage warning.
+- [ ] A judge-only tag disagreement pauses the candidate for review; parser-confirmed `wrong_index` handles separately.
+- [ ] A stateful judge whose first call failed before response-ID commit re-attaches the file on the retry.
+
+### Webhook delivery races
+- [ ] A webhook arriving before the response mapping is written remains in the inbox and resolves once the mapping is registered.
+- [ ] Duplicate webhook delivery retains accounting but does not reopen a settled execution decision.
+
+### Branching
+- [ ] A snapshot above 8,000,000 encoded bytes is rejected with an explicit error.
+- [ ] A branch on a quiescent parent activates after file protection and conditional superseding.
+- [ ] A branch whose parent resumes during snapshot initialization aborts safely and cleans up its files.
+- [ ] Copied history shows inherited provenance, not new branch spend.
+
+### Exports
+- [ ] A Markdown export captures the accepted-prefix boundary at export start; later acceptances do not appear.
+- [ ] A JSON export of a job with a retained inline judge request includes the encoded file bytes; a job with passthrough files does not.
+- [ ] A live JSON export reports starting revision and high-water keys; a record created after export start is excluded.
+- [ ] No export contains credential values.
+
+## Fixtures and helpers
+- `fixtures/requests.ts` — canonical generation request builders using the shared continuity helper; assert against stored bytes, not reconstructed objects.
+- `fixtures/jobs.ts` — deterministic job states (ready, running, awaiting judge, paused, failed, cancelled, branched).
+- `fixtures/files.ts` — byte buffers at guard boundaries **only where an integration test needs real bytes**. All guard arithmetic tests belong in `guards.test.ts` and take mocked sizes. Allocate real buffers with `new Uint8Array(N)` and only once per test file; do not build them with string concatenation.
+- `fixtures/judge.ts` — declared judge configurations covering every provider/transport/history/file-delivery combination in `README.md`, plus intentionally inconsistent declarations, including an unencodable contract that must fail request generation rather than send a stripped request.
+- `fixtures/webhooks.ts` — Standard Webhooks signing helper: given `webhook-id`, `webhook-timestamp`, and raw body bytes, produce the signature under a test secret. Used by all webhook tests so concatenation is exercised consistently.
+
+Helpers must intercept outbound `fetch` at the `ProviderIO` seam so canonical-request bytes and header resolution are still asserted.
+
+## Coverage expectations
+- Every numbered item above has at least one direct test.
+- `src/lib/continuity.ts` has 100% branch coverage; it owns the stateful/stateless serialization contract and is shared by generation and judge.
+- `src/db/schema.ts` guard arithmetic has 100% branch coverage; pure guard functions are exhaustively unit-tested with mocked sizes. Schema DDL validation and migration idempotency are covered by `test/db/schema.test.ts` and `test/db/migrations.test.ts`.
+- `src/lib/tag.ts` normalization, marker-removal, and structural classification paths have 100% branch coverage; `empty_output`, `trailing_content`, and precedence over refusal/cancellation are the highest-risk branches.
+- `src/lib/signature.ts` byte-exactness, field concatenation (ID + timestamp + body), and timestamp-tolerance paths are covered by both positive and negative tests, including a `webhook-id`-only tamper case.
+- `src/db/router.ts` inbox idempotency and out-of-order handling have explicit duplicate and reordered-event tests.
+- `src/lib/dispatch.ts` long-context classification has explicit tests at 271,999 / 272,000 / 272,001 with cached input included. Idempotency-Key **presence** and stability across retries are explicitly asserted; the test does not assert a string format the architecture does not define.
+- `src/lib/judge.ts` stateful history has explicit tests for both commit-before-success and failure-before-response-ID-commit attachment behavior.
+- `src/do/job-do.ts` branch activation has an explicit superseding-race test.
+- Test files use `reset()` and `abortAllDurableObjects()` in `afterEach` and settle all scheduled alarms before finishing; no test relies on fresh Durable Object IDs as its primary isolation mechanism.
+- `waitUntil` promises are settled with `waitOnExecutionContext` or an equivalent explicit await; no test finishes with outstanding background work.
+- Manual verification is required for any deployment-level change; CI cannot substitute for it.

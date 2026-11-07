@@ -978,11 +978,10 @@ export interface JobFileRow extends Record<string, SqlPrimitiveValue> {
   created_at: string;
 }
 
-/** `turns` row including `prompt_blob`. Omit `prompt_blob` in list queries (`TurnSummaryRow`). */
-export interface TurnRow extends Record<string, SqlPrimitiveValue> {
+/** `turns` summary row omitting `prompt_blob` for list queries. */
+export interface TurnSummaryRow extends Record<string, SqlPrimitiveValue> {
   turn_index: number;
   status: "pending" | "running" | "judging" | "paused_review" | "accepted" | "failed" | "cancelled";
-  prompt_blob: ArrayBuffer | Uint8Array;
   prompt_bytes: number;
   row_bytes: number;
   attachment_file_ids_json: string;
@@ -995,7 +994,10 @@ export interface TurnRow extends Record<string, SqlPrimitiveValue> {
   updated_at: string;
 }
 
-export type TurnSummaryRow = Omit<TurnRow, "prompt_blob">;
+/** `turns` row including `prompt_blob`. Omit `prompt_blob` in list queries (`TurnSummaryRow`). */
+export interface TurnRow extends TurnSummaryRow {
+  prompt_blob: ArrayBuffer | Uint8Array;
+}
 
 export type CandidateStructuralStatus =
   | "valid"
@@ -1007,13 +1009,12 @@ export type CandidateStructuralStatus =
   | "provider_failed"
   | "cancelled";
 
-export interface TurnCandidateRow extends Record<string, SqlPrimitiveValue> {
+export interface TurnCandidateSummaryRow extends Record<string, SqlPrimitiveValue> {
   candidate_id: string;
   turn_index: number;
   attempt_id: string;
   structural_status: CandidateStructuralStatus;
   parsed_tag_index: number | null;
-  deliverable_blob: ArrayBuffer | Uint8Array | null;
   deliverable_bytes: number;
   row_bytes: number;
   accepted: number;
@@ -1021,9 +1022,11 @@ export interface TurnCandidateRow extends Record<string, SqlPrimitiveValue> {
   created_at: string;
 }
 
-export type TurnCandidateSummaryRow = Omit<TurnCandidateRow, "deliverable_blob">;
+export interface TurnCandidateRow extends TurnCandidateSummaryRow {
+  deliverable_blob: ArrayBuffer | Uint8Array | null;
+}
 
-export interface GenerationAttemptRow extends Record<string, SqlPrimitiveValue> {
+export interface GenerationAttemptSummaryRow extends Record<string, SqlPrimitiveValue> {
   attempt_id: string;
   turn_index: number;
   attempt_number: number;
@@ -1046,7 +1049,6 @@ export interface GenerationAttemptRow extends Record<string, SqlPrimitiveValue> 
   next_backoff_at_ms: number | null;
   poll_probes: number;
   next_poll_at_ms: number | null;
-  request_blob: ArrayBuffer | Uint8Array;
   request_bytes: number;
   row_bytes: number;
   usage_json: string | null;
@@ -1055,21 +1057,24 @@ export interface GenerationAttemptRow extends Record<string, SqlPrimitiveValue> 
   updated_at: string;
 }
 
-export type GenerationAttemptSummaryRow = Omit<GenerationAttemptRow, "request_blob">;
+export interface GenerationAttemptRow extends GenerationAttemptSummaryRow {
+  request_blob: ArrayBuffer | Uint8Array;
+}
 
-export interface AttemptResponseArtifactRow extends Record<string, SqlPrimitiveValue> {
+export interface AttemptResponseArtifactSummaryRow extends Record<string, SqlPrimitiveValue> {
   attempt_id: string;
   turn_index: number;
   provider_response_id: string;
-  response_blob: ArrayBuffer | Uint8Array;
   response_bytes: number;
   row_bytes: number;
   created_at: string;
 }
 
-export type AttemptResponseArtifactSummaryRow = Omit<AttemptResponseArtifactRow, "response_blob">;
+export interface AttemptResponseArtifactRow extends AttemptResponseArtifactSummaryRow {
+  response_blob: ArrayBuffer | Uint8Array;
+}
 
-export interface JudgeCallRow extends Record<string, SqlPrimitiveValue> {
+export interface JudgeCallSummaryRow extends Record<string, SqlPrimitiveValue> {
   judge_call_id: string;
   turn_index: number;
   candidate_id: string;
@@ -1087,7 +1092,6 @@ export interface JudgeCallRow extends Record<string, SqlPrimitiveValue> {
   tag_agreement: number | null;
   file_visibility: number | null;
   manifest_json: string;
-  request_blob: ArrayBuffer | Uint8Array;
   request_bytes: number;
   row_bytes: number;
   usage_json: string | null;
@@ -1096,7 +1100,9 @@ export interface JudgeCallRow extends Record<string, SqlPrimitiveValue> {
   updated_at: string;
 }
 
-export type JudgeCallSummaryRow = Omit<JudgeCallRow, "request_blob">;
+export interface JudgeCallRow extends JudgeCallSummaryRow {
+  request_blob: ArrayBuffer | Uint8Array;
+}
 
 export interface DurableWorkRow extends Record<string, SqlPrimitiveValue> {
   work_id: string;
@@ -1120,7 +1126,7 @@ export interface ResponseRouteRow extends Record<string, SqlPrimitiveValue> {
   updated_at: string;
 }
 
-export interface WebhookInboxRow extends Record<string, SqlPrimitiveValue> {
+export interface WebhookInboxSummaryRow extends Record<string, SqlPrimitiveValue> {
   webhook_id: string;
   event_type:
     | "response.completed"
@@ -1134,7 +1140,6 @@ export interface WebhookInboxRow extends Record<string, SqlPrimitiveValue> {
   status: "pending" | "unmatched" | "delivered" | "duplicate" | "failed";
   delivery_attempts: number;
   next_attempt_at_ms: number | null;
-  raw_body_blob: ArrayBuffer | Uint8Array;
   raw_body_bytes: number;
   row_bytes: number;
   last_error: string | null;
@@ -1142,7 +1147,9 @@ export interface WebhookInboxRow extends Record<string, SqlPrimitiveValue> {
   updated_at: string;
 }
 
-export type WebhookInboxSummaryRow = Omit<WebhookInboxRow, "raw_body_blob">;
+export interface WebhookInboxRow extends WebhookInboxSummaryRow {
+  raw_body_blob: ArrayBuffer | Uint8Array;
+}
 
 export interface JobIndexRow extends Record<string, SqlPrimitiveValue> {
   job_id: string;

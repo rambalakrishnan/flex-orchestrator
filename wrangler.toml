@@ -1,0 +1,30 @@
+name = "flex-orchestrator"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = false
+preview_urls = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]
+name = "JOB_DO"
+class_name = "JobDO"
+
+[[durable_objects.bindings]]
+name = "ROUTER_DO"
+class_name = "RouterDO"
+
+[[durable_objects.bindings]]
+name = "REGISTRY_DO"
+class_name = "RegistryDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JobDO", "RouterDO", "RegistryDO"]
+
+[vars]
+FILE_RETENTION_SECONDS = "604800"
+JUDGE_DEFAULT_MODEL = "muse-spark-1.3-contributor"

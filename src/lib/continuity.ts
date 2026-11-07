@@ -52,7 +52,9 @@ export function resolvePreviousResponseId(
  * - When `mode === "stateful"`: extracts `previousResponseId` from `anchor`.
  *   If non-empty trimmed string, returns `{ previous_response_id: previousResponseId, store: true }`;
  *   otherwise returns `{ store: true }`.
- * - When `mode === "stateless"`: returns `{ store: false }` (never sends `previous_response_id`).
+ * - When `mode === "stateless"`: returns `{ store: false, include: ["reasoning.encrypted_content"] }`
+ *   (encrypted reasoning content preserves reasoning across stateless calls) and never sends
+ *   `previous_response_id`.
  */
 export function reasoningContinuityPayload(
   mode: ContinuityMode,
@@ -73,6 +75,7 @@ export function reasoningContinuityPayload(
 
   return {
     store: false,
+    include: ["reasoning.encrypted_content"],
   };
 }
 

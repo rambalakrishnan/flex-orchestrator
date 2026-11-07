@@ -4,30 +4,45 @@
  * Deliverable text normalization, completion/continuation tag formatting,
  * and structural classification per docs/ARCHITECTURE.md (§7) and src/types.ts.
  *
+ * Canonical completion dialect (HTML comments, positive 1-based turn indices):
+ * - terminal marker: `<!-- TURN_END:n -->`
+ * - continuation marker: `<!-- TURN_CONTINUE:n -->`
+ *
  * Key invariants:
  * 1. Dependency DAG: imports ONLY from `src/constants.ts` and `src/types.ts`.
  * 2. Structural acceptance requires non-empty retained deliverable text.
- *    Output that becomes empty after normalization and completion-marker
- *    removal is classified as `empty_output` (`"empty"`, `"whitespace_only"`,
- *    or `"marker_only"`), even when a syntactically valid completion tag
- *    is present. An apparent valid completion tag never makes an empty
- *    candidate judgeable.
- * 3. Canonical completion tags (`<TURN_COMPLETE turn="N" />`,
- *    `<TURN_COMPLETE turn="N"></TURN_COMPLETE>`, `[[TURN_COMPLETE:N]]`) and
- *    continuation tags (`<TURN_CONTINUE turn="N" />`,
- *    `<TURN_CONTINUE turn="N"></TURN_CONTINUE>`, `[[TURN_CONTINUE:N]]`) are
- *    parsed for non-negative integer turn indices `N`.
+ *    Output that becomes empty after normalization and marker removal is
+ *    `empty_output` (`"empty"`, `"whitespace_only"`, or `"marker_only"`), even
+ *    when a syntactically valid completion marker is present. An apparent
+ *    valid completion marker never makes an empty candidate judgeable.
+ * 3. Precedence is fixed: provider failure, cancellation, incomplete provider
+ *    responses, and refusal handling take precedence over tag parsing, and
+ *    `empty_output` never reaches the judge.
  * 4. Malformed or conflicting markers return `malformed_tag`; missing markers
- *    return `missing_tag`; mismatched turn indices return `wrong_index`.
+ *    return `missing_tag`; mismatched turn indices return `wrong_index`; text
+ *    after a valid marker returns `trailing_content` (the trailing bytes are
+ *    retained for diagnostics but never become the deliverable).
  */
 
-import type { StructuralClassification, TurnIndex } from "../types";
+import type {
+  AttemptStatus,
+  StructuralClassification,
+  TurnIndex,
+  TurnStatus,
+} from "../types.ts";
 
-/** Parameters accepted by `classifyCandidateOutput`. */
+/** Provider-reported terminal status for a generation response. */
+export type CandidateProviderStatus =
+  | "completed"
+  | "incomplete"
+  | "failed"
+  | "cancelled";
+
+/** Parameters accepted by `classifyCandidateOutput` and `classifyCandidateOutcome`. */
 export interface ClassifyCandidateOutputParams {
   readonly rawOutputText: string | null | undefined;
   readonly expectedTurnIndex: TurnIndex;
-  readonly providerStatus?: "completed" | "incomplete" | "failed" | "cancelled";
+  readonly providerStatus?: CandidateProviderStatus;
   readonly refusalText?: string | null;
 }
 
@@ -52,45 +67,63 @@ interface ParsedMalformedMarker {
 
 type ParsedMarkerOccurrence = ParsedValidMarker | ParsedMalformedMarker;
 
-/**
- * Broad scanner matching any XML-style `<TURN_COMPLETE...>` / `</TURN_COMPLETE...>` /
- * `<TURN_CONTINUE...>` / `</TURN_CONTINUE...>` (including unclosed tags to end-of-line/input)
- * or bracket-style `[[TURN_COMPLETE...]]` / `[[TURN_CONTINUE...]]` (including unclosed `[[TURN_...`).
- */
-const MARKER_CANDIDATE_PATTERN =
-  /<\/?TURN_(?:COMPLETE|CONTINUE)\b(?:[^<>]*>\s*<\/TURN_(?:COMPLETE|CONTINUE)\s*>|[^<>]*>|[^\r\n]*)|\[\[\s*TURN_(?:COMPLETE|CONTINUE)\b(?:\s*:[^\]\r\n]*\]\]|[^\r\n]*)/gi;
+/** Full classification produced by `classifyCandidateOutput`. */
+export type CandidateClassification = StructuralClassification;
+
+/** Structural status assigned to a classified candidate. */
+export type CandidateOutcomeStatus =
+  | "valid"
+  | "continuation"
+  | "trailing_content"
+  | "empty_output"
+  | "missing_tag"
+  | "wrong_index"
+  | "malformed_tag"
+  | "refusal"
+  | "incomplete"
+  | "provider_failed"
+  | "cancelled";
+
+/** Unified adapter result consumed by JobDO orchestration. */
+export interface CandidateOutcome {
+  readonly classification: CandidateClassification;
+  readonly structuralStatus: CandidateOutcomeStatus;
+  readonly turnStatus: TurnStatus;
+  readonly attemptStatus: AttemptStatus;
+  readonly judgeRequired: boolean;
+  readonly warnings: readonly string[];
+}
+
+/** Warning emitted when deliverable text follows a valid completion marker. */
+export const TRAILING_CONTENT_WARNING = "trailing_content_truncated";
 
 /**
- * Valid XML-style marker pattern:
- * - `<TURN_COMPLETE turn="N" />` or `<TURN_COMPLETE turn='N'>`
- * - `<TURN_COMPLETE turn="N"></TURN_COMPLETE>`
- * - `<TURN_CONTINUE turn="N" />` or `<TURN_CONTINUE turn="N"></TURN_CONTINUE>`
+ * Matches the opening of a canonical turn marker comment, including
+ * unclosed and unknown `TURN_*` markers, so malformed markers are reported
+ * instead of silently leaking into the deliverable.
  */
-const XML_MARKER_EXACT_PATTERN =
-  /^<(TURN_COMPLETE|TURN_CONTINUE)\s+turn\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s/>]+))\s*(?:\/>|>\s*<\/\1\s*>|(?=>)>$)/;
+const TURN_MARKER_START_PATTERN = /<!--\s*TURN_/gi;
 
 /**
- * Valid bracket-style marker pattern:
- * - `[[TURN_COMPLETE:N]]`
- * - `[[TURN_CONTINUE:N]]`
+ * Marker body pattern: ` TURN_END:n ` / ` TURN_CONTINUE:n ` with an optional
+ * whitespace around the colon.
  */
-const BRACKET_MARKER_EXACT_PATTERN =
-  /^\[\[\s*(TURN_COMPLETE|TURN_CONTINUE)\s*:\s*([^\]]*?)\s*\]\]$/;
+const TURN_MARKER_BODY_PATTERN = /^\s*TURN_(END|CONTINUE)\s*:\s*(\S+)\s*$/i;
 
 /**
- * Formats the canonical terminal completion tag for `turnIndex`:
- * `<TURN_COMPLETE turn="${turnIndex}" />`.
+ * Formats the canonical terminal completion marker for `turnIndex`:
+ * `<!-- TURN_END:${turnIndex} -->`.
  */
 export function formatCompletionTag(turnIndex: TurnIndex): string {
-  return `<TURN_COMPLETE turn="${turnIndex}" />`;
+  return `<!-- TURN_END:${turnIndex} -->`;
 }
 
 /**
- * Formats the canonical continuation tag for `turnIndex`:
- * `<TURN_CONTINUE turn="${turnIndex}" />`.
+ * Formats the canonical continuation marker for `turnIndex`:
+ * `<!-- TURN_CONTINUE:${turnIndex} -->`.
  */
 export function formatContinuationTag(turnIndex: TurnIndex): string {
-  return `<TURN_CONTINUE turn="${turnIndex}" />`;
+  return `<!-- TURN_CONTINUE:${turnIndex} -->`;
 }
 
 /**
@@ -131,86 +164,47 @@ export function normalizeDeliverableText(rawText: string): string {
 }
 
 /**
- * Parses a strict non-negative integer turn index (`0`, `1`, `2`, ...).
- * Returns `null` if the string is empty, contains non-digits, is negative,
- * or exceeds `Number.MAX_SAFE_INTEGER`.
+ * Parses a strict positive integer turn index (`1`, `2`, ...). Returns `null`
+ * for empty values, non-digits, negative/zero values, and values exceeding
+ * `Number.MAX_SAFE_INTEGER`.
  */
-function parseNonNegativeTurnIndex(rawValue: string): TurnIndex | null {
-  const trimmed = rawValue.trim();
-  if (!/^\d+$/.test(trimmed)) {
+function parsePositiveTurnIndex(rawValue: string): TurnIndex | null {
+  if (!/^\d+$/.test(rawValue)) {
     return null;
   }
-  const parsed = Number(trimmed);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
     return null;
   }
   return parsed;
 }
 
 /**
- * Classifies a single matched marker substring as either a valid completion/continuation
- * marker or a malformed marker with an explicit diagnostic reason.
+ * Classifies one raw marker comment as valid or malformed with an explicit
+ * diagnostic reason.
  */
 function parseMarkerCandidate(
   rawTag: string,
   startIndex: number,
   endIndex: number,
 ): ParsedMarkerOccurrence {
-  if (rawTag.startsWith("<")) {
-    const xmlMatch = XML_MARKER_EXACT_PATTERN.exec(rawTag);
-    if (xmlMatch === null) {
-      return {
-        status: "malformed",
-        reason: `Malformed XML turn marker: ${rawTag}`,
-        rawTag,
-        startIndex,
-        endIndex,
-      };
-    }
-
-    const tagName = xmlMatch[1];
-    const rawAttr = xmlMatch[2] ?? xmlMatch[3] ?? xmlMatch[4] ?? "";
-    const turnIndex = parseNonNegativeTurnIndex(rawAttr);
-    if (turnIndex === null) {
-      return {
-        status: "malformed",
-        reason: `Invalid non-negative integer turn attribute in marker: ${rawTag}`,
-        rawTag,
-        startIndex,
-        endIndex,
-      };
-    }
-
-    const kind: ParsedMarkerKind =
-      tagName === "TURN_COMPLETE" ? "terminal" : "continuation";
-    return {
-      status: "valid",
-      kind,
-      turnIndex,
-      rawTag,
-      startIndex,
-      endIndex,
-    };
-  }
-
-  const bracketMatch = BRACKET_MARKER_EXACT_PATTERN.exec(rawTag);
-  if (bracketMatch === null) {
+  const body = rawTag.slice(4, rawTag.length - 3);
+  const bodyMatch = TURN_MARKER_BODY_PATTERN.exec(body);
+  if (bodyMatch === null) {
     return {
       status: "malformed",
-      reason: `Malformed bracket turn marker: ${rawTag}`,
+      reason: `Malformed turn marker: ${rawTag}`,
       rawTag,
       startIndex,
       endIndex,
     };
   }
 
-  const tagName = bracketMatch[1];
-  const rawAttr = bracketMatch[2] ?? "";
-  const turnIndex = parseNonNegativeTurnIndex(rawAttr);
+  const turnIndex = parsePositiveTurnIndex(bodyMatch[2] ?? "");
   if (turnIndex === null) {
     return {
       status: "malformed",
-      reason: `Invalid non-negative integer turn index in bracket marker: ${rawTag}`,
+      reason: `Invalid positive integer turn index in marker: ${rawTag}`,
       rawTag,
       startIndex,
       endIndex,
@@ -218,7 +212,7 @@ function parseMarkerCandidate(
   }
 
   const kind: ParsedMarkerKind =
-    tagName === "TURN_COMPLETE" ? "terminal" : "continuation";
+    (bodyMatch[1] ?? "").toUpperCase() === "END" ? "terminal" : "continuation";
   return {
     status: "valid",
     kind,
@@ -230,133 +224,160 @@ function parseMarkerCandidate(
 }
 
 /**
- * Scans `text` for all completion/continuation marker occurrences (valid or malformed)
- * and builds the marker-stripped string.
+ * Scans `text` for all canonical turn marker comments (valid, malformed, or
+ * unclosed) in document order.
  */
-function extractMarkersAndStripText(text: string): {
-  readonly occurrences: readonly ParsedMarkerOccurrence[];
-  readonly strippedText: string;
-} {
+function scanMarkerOccurrences(text: string): ParsedMarkerOccurrence[] {
   const occurrences: ParsedMarkerOccurrence[] = [];
-  const pieces: string[] = [];
-  let cursor = 0;
 
-  MARKER_CANDIDATE_PATTERN.lastIndex = 0;
-  let match = MARKER_CANDIDATE_PATTERN.exec(text);
+  TURN_MARKER_START_PATTERN.lastIndex = 0;
+  let match = TURN_MARKER_START_PATTERN.exec(text);
   while (match !== null) {
-    const rawTag = match[0];
     const startIndex = match.index;
-    const endIndex = startIndex + rawTag.length;
+    const contentStart = startIndex + match[0].length;
+    const closeIndex = text.indexOf("-->", contentStart);
 
-    if (startIndex > cursor) {
-      pieces.push(text.slice(cursor, startIndex));
+    if (closeIndex === -1) {
+      const rawTag = text.slice(startIndex);
+      occurrences.push({
+        status: "malformed",
+        reason: `Unclosed turn marker: ${rawTag}`,
+        rawTag,
+        startIndex,
+        endIndex: text.length,
+      });
+      break;
     }
-    occurrences.push(parseMarkerCandidate(rawTag, startIndex, endIndex));
-    cursor = endIndex;
 
-    match = MARKER_CANDIDATE_PATTERN.exec(text);
+    const endIndex = closeIndex + 3;
+    occurrences.push(
+      parseMarkerCandidate(text.slice(startIndex, endIndex), startIndex, endIndex),
+    );
+
+    TURN_MARKER_START_PATTERN.lastIndex = endIndex;
+    match = TURN_MARKER_START_PATTERN.exec(text);
   }
 
-  if (cursor < text.length) {
-    pieces.push(text.slice(cursor));
-  }
-
-  return {
-    occurrences,
-    strippedText: pieces.join(""),
-  };
+  return occurrences;
 }
 
 /**
- * Performs structural classification on a candidate generation output per §7:
- * - Empty input (`null`, `undefined`, `""`) -> `{ kind: "empty_output", reason: "empty" }`
- * - Whitespace-only input -> `{ kind: "empty_output", reason: "whitespace_only" }`
- * - Valid marker(s) with no remaining deliverable text after normalization ->
- *   `{ kind: "empty_output", reason: "marker_only" }` (§7 invariant: an apparent
- *   valid completion tag never makes an empty candidate judgeable)
- * - Malformed or conflicting markers -> `{ kind: "malformed_tag", reason, normalizedText }`
- * - No marker present -> `{ kind: "missing_tag", normalizedText }`
- * - Valid marker with `actualTurnIndex !== expectedTurnIndex` ->
- *   `{ kind: "wrong_index", expectedTurnIndex, actualTurnIndex, normalizedText, rawTag }`
- * - Valid continuation marker matching `expectedTurnIndex` ->
- *   `{ kind: "continuation", turnIndex: expectedTurnIndex, normalizedText, rawTag }`
- * - Valid completion marker matching `expectedTurnIndex` with non-empty deliverable ->
- *   `{ kind: "terminal", turnIndex: expectedTurnIndex, normalizedText, rawTag }`
+ * Removes every marker occurrence from `text`, joining the remaining pieces.
+ */
+function stripMarkerOccurrences(
+  text: string,
+  occurrences: readonly ParsedMarkerOccurrence[],
+): string {
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const occurrence of occurrences) {
+    if (occurrence.startIndex > cursor) {
+      pieces.push(text.slice(cursor, occurrence.startIndex));
+    }
+    cursor = occurrence.endIndex;
+  }
+  if (cursor < text.length) {
+    pieces.push(text.slice(cursor));
+  }
+  return pieces.join("");
+}
+
+/**
+ * Performs structural classification on a candidate generation output per §7,
+ * with fixed precedence: provider failure, cancellation, incomplete provider
+ * responses, and refusal handling all take precedence over marker parsing.
+ *
+ * Marker dialect: `<!-- TURN_END:n -->` and `<!-- TURN_CONTINUE:n -->` for
+ * positive integer `n`.
  */
 export function classifyCandidateOutput(
   params: ClassifyCandidateOutputParams,
-): StructuralClassification {
-  const { rawOutputText, expectedTurnIndex } = params;
+): CandidateClassification {
+  const { expectedTurnIndex, providerStatus, rawOutputText, refusalText } = params;
+
+  if (providerStatus === "failed") {
+    return { kind: "provider_failed" };
+  }
+  if (providerStatus === "cancelled") {
+    return { kind: "cancelled" };
+  }
+  if (providerStatus === "incomplete") {
+    return { kind: "incomplete" };
+  }
+
+  const trimmedRefusal = refusalText?.trim() ?? "";
+  if (trimmedRefusal.length > 0) {
+    return { kind: "refusal", refusalText: trimmedRefusal };
+  }
 
   if (
     rawOutputText === null ||
     rawOutputText === undefined ||
     rawOutputText.length === 0
   ) {
-    return {
-      kind: "empty_output",
-      reason: "empty",
-    };
+    return { kind: "empty_output", reason: "empty" };
   }
 
   if (rawOutputText.trim().length === 0) {
-    return {
-      kind: "empty_output",
-      reason: "whitespace_only",
-    };
+    return { kind: "empty_output", reason: "whitespace_only" };
   }
 
-  const { occurrences, strippedText } =
-    extractMarkersAndStripText(rawOutputText);
-  const normalizedText = normalizeDeliverableText(strippedText);
+  const occurrences = scanMarkerOccurrences(rawOutputText);
 
   if (occurrences.length === 0) {
-    if (normalizedText.length === 0) {
-      return {
-        kind: "empty_output",
-        reason: "whitespace_only",
-      };
-    }
     return {
       kind: "missing_tag",
-      normalizedText,
+      normalizedText: normalizeDeliverableText(rawOutputText),
     };
   }
 
-  for (const occurrence of occurrences) {
-    if (occurrence.status === "malformed") {
-      return {
-        kind: "malformed_tag",
-        reason: occurrence.reason,
-        normalizedText,
-      };
-    }
-  }
-
-  // All occurrences are syntactically valid markers. Check for conflicts across multiple markers.
-  const firstMarker = occurrences[0] as ParsedValidMarker;
-  for (let i = 1; i < occurrences.length; i += 1) {
-    const current = occurrences[i] as ParsedValidMarker;
-    if (
-      current.kind !== firstMarker.kind ||
-      current.turnIndex !== firstMarker.turnIndex
-    ) {
-      return {
-        kind: "malformed_tag",
-        reason: `Conflicting turn markers: "${firstMarker.rawTag}" vs "${current.rawTag}"`,
-        normalizedText,
-      };
-    }
-  }
-
-  // §7 invariant: Output that becomes empty after normalization and marker removal
-  // is `empty_output` (`reason: "marker_only"`), even when a valid tag was present.
-  if (normalizedText.length === 0) {
+  const malformedOccurrence = occurrences.find(
+    (occurrence): occurrence is ParsedMalformedMarker =>
+      occurrence.status === "malformed",
+  );
+  if (malformedOccurrence !== undefined) {
     return {
-      kind: "empty_output",
-      reason: "marker_only",
+      kind: "malformed_tag",
+      reason: malformedOccurrence.reason,
+      normalizedText: normalizeDeliverableText(
+        stripMarkerOccurrences(rawOutputText, occurrences),
+      ),
     };
   }
+
+  const validOccurrences = occurrences.filter(
+    (occurrence): occurrence is ParsedValidMarker =>
+      occurrence.status === "valid",
+  );
+  const firstMarker = validOccurrences[0];
+  if (firstMarker === undefined) {
+    return {
+      kind: "missing_tag",
+      normalizedText: normalizeDeliverableText(rawOutputText),
+    };
+  }
+
+  if (validOccurrences.length > 1) {
+    const conflicting = validOccurrences.find(
+      (marker) =>
+        marker.kind !== firstMarker.kind ||
+        marker.turnIndex !== firstMarker.turnIndex,
+    );
+    return {
+      kind: "malformed_tag",
+      reason:
+        conflicting === undefined
+          ? `Multiple turn markers found: "${firstMarker.rawTag}"`
+          : `Conflicting turn markers: "${firstMarker.rawTag}" vs "${conflicting.rawTag}"`,
+      normalizedText: normalizeDeliverableText(
+        stripMarkerOccurrences(rawOutputText, occurrences),
+      ),
+    };
+  }
+
+  const normalizedText = normalizeDeliverableText(
+    rawOutputText.slice(0, firstMarker.startIndex),
+  );
 
   if (firstMarker.turnIndex !== expectedTurnIndex) {
     return {
@@ -366,6 +387,24 @@ export function classifyCandidateOutput(
       normalizedText,
       rawTag: firstMarker.rawTag,
     };
+  }
+
+  const trailingText = rawOutputText.slice(firstMarker.endIndex).trim();
+  if (trailingText.length > 0) {
+    return {
+      kind: "trailing_content",
+      turnIndex: expectedTurnIndex,
+      normalizedText,
+      rawTag: firstMarker.rawTag,
+      trailingText,
+    };
+  }
+
+  // §7 invariant: output that becomes empty after normalization and marker
+  // removal is `empty_output` (`reason: "marker_only"`), even when a valid
+  // marker was present.
+  if (normalizedText.length === 0) {
+    return { kind: "empty_output", reason: "marker_only" };
   }
 
   if (firstMarker.kind === "continuation") {
@@ -386,11 +425,134 @@ export function classifyCandidateOutput(
 }
 
 /**
- * Type guard verifying whether a `StructuralClassification` is a judgeable
- * terminal candidate with non-empty normalized deliverable text.
+ * Unified adapter mapping a `classifyCandidateOutput` classification onto the
+ * turn/attempt/structural statuses and judge requirement used by JobDO.
+ *
+ * @throws RangeError when `expectedTurnIndex` is not an integer >= 1.
+ */
+export function classifyCandidateOutcome(
+  params: ClassifyCandidateOutputParams,
+): CandidateOutcome {
+  const { expectedTurnIndex } = params;
+  if (!Number.isInteger(expectedTurnIndex) || expectedTurnIndex < 1) {
+    throw new RangeError(
+      `expectedTurnIndex must be an integer >= 1, received ${expectedTurnIndex}`,
+    );
+  }
+
+  const classification = classifyCandidateOutput(params);
+
+  switch (classification.kind) {
+    case "provider_failed":
+      return {
+        classification,
+        structuralStatus: "provider_failed",
+        turnStatus: "failed",
+        attemptStatus: "failed",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "cancelled":
+      return {
+        classification,
+        structuralStatus: "cancelled",
+        turnStatus: "cancelled",
+        attemptStatus: "cancelled",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "incomplete":
+      return {
+        classification,
+        structuralStatus: "incomplete",
+        turnStatus: "running",
+        attemptStatus: "incomplete",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "refusal":
+      return {
+        classification,
+        structuralStatus: "refusal",
+        turnStatus: "paused_review",
+        attemptStatus: "refused",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "terminal":
+      return {
+        classification,
+        structuralStatus: "valid",
+        turnStatus: "awaiting_judge",
+        attemptStatus: "completed",
+        judgeRequired: true,
+        warnings: [],
+      };
+    case "continuation":
+      return {
+        classification,
+        structuralStatus: "continuation",
+        turnStatus: "running",
+        attemptStatus: "completed",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "trailing_content": {
+      const judgeRequired = classification.normalizedText.length > 0;
+      return {
+        classification,
+        structuralStatus: "trailing_content",
+        turnStatus: judgeRequired ? "awaiting_judge" : "failed",
+        attemptStatus: "completed",
+        judgeRequired,
+        warnings: [TRAILING_CONTENT_WARNING],
+      };
+    }
+    case "empty_output":
+      return {
+        classification,
+        structuralStatus: "empty_output",
+        turnStatus: "failed",
+        attemptStatus: "failed",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "wrong_index":
+      return {
+        classification,
+        structuralStatus: "wrong_index",
+        turnStatus: "failed",
+        attemptStatus: "failed",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "missing_tag":
+      return {
+        classification,
+        structuralStatus: "missing_tag",
+        turnStatus: "failed",
+        attemptStatus: "failed",
+        judgeRequired: false,
+        warnings: [],
+      };
+    case "malformed_tag":
+      return {
+        classification,
+        structuralStatus: "malformed_tag",
+        turnStatus: "failed",
+        attemptStatus: "failed",
+        judgeRequired: false,
+        warnings: [],
+      };
+  }
+}
+
+/**
+ * Type guard verifying whether a classification is a judgeable terminal
+ * candidate with non-empty normalized deliverable text.
  */
 export function isJudgeableClassification(
-  classification: StructuralClassification,
+  classification: CandidateClassification,
 ): classification is Extract<
   StructuralClassification,
   { readonly kind: "terminal" }

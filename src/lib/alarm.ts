@@ -19,43 +19,35 @@
  *    with a 24-probe bound.
  */
 
+import {
+  FALLBACK_POLL_FIRST_DELAY_MS,
+  FALLBACK_POLL_SECOND_DELAY_MS,
+  FALLBACK_POLL_STEADY_DELAY_MS,
+  MAX_FALLBACK_POLL_PROBES,
+  PLATFORM_ALARM_MAX_RETRIES,
+  PLATFORM_ALARM_MAX_WALL_TIME_MS,
+} from "../constants.ts";
+import { now } from "./clock.ts";
+
 /** Minimal storage surface required for Durable Object alarm operations. */
 export type AlarmStorage = Pick<
   DurableObjectStorage,
   "getAlarm" | "setAlarm" | "deleteAlarm"
 >;
 
-/** Platform maximum automatic retry count for a failing `alarm()` handler. */
-export const PLATFORM_ALARM_MAX_RETRIES = 6;
-
 /**
  * Retry count threshold at which `runWithAlarmSafety` intercepts errors and
  * schedules a fresh alarm instead of allowing the final retry to throw and drop
  * the alarm permanently (`retryCount` is 0-indexed on retries or 1..6 depending
- * on platform invocation; `>= 5` protects the 6-retry budget).
+ * on platform invocation; the threshold protects the 6-retry budget).
  */
-export const ALARM_RETRY_RESCHEDULE_THRESHOLD = 5;
+export const ALARM_RETRY_RESCHEDULE_THRESHOLD = PLATFORM_ALARM_MAX_RETRIES - 1;
 
 /** Default fallback delay (ms) when rescheduling after retry-budget exhaustion. */
 export const DEFAULT_RETRY_EXHAUSTION_DELAY_MS = 30_000;
 
-/** Platform maximum wall-clock execution time (ms) per alarm invocation (15 minutes). */
-export const ALARM_MAX_WALL_TIME_MS = 15 * 60 * 1_000;
-
 /** Safe per-invocation wall-clock budget (ms) leaving headroom below the 15-minute limit. */
-export const ALARM_SAFE_EXECUTION_BUDGET_MS = 14 * 60 * 1_000;
-
-/** Maximum number of fallback poll probes per attempt before stopping automatic polling. */
-export const FALLBACK_POLL_MAX_PROBES = 24;
-
-/** First fallback poll delay: 5 minutes (ms). */
-export const FALLBACK_POLL_FIRST_DELAY_MS = 5 * 60 * 1_000;
-
-/** Second fallback poll delay: 1 minute (ms). */
-export const FALLBACK_POLL_SECOND_DELAY_MS = 1 * 60 * 1_000;
-
-/** Subsequent fallback poll delay (probes 3..24): 5 minutes (ms). */
-export const FALLBACK_POLL_STEADY_DELAY_MS = 5 * 60 * 1_000;
+export const ALARM_SAFE_EXECUTION_BUDGET_MS = PLATFORM_ALARM_MAX_WALL_TIME_MS - 60_000;
 
 /**
  * Normalizes a `number | Date` timestamp to epoch milliseconds and validates finiteness.
@@ -187,7 +179,7 @@ export function getFallbackPollDelayMs(completedProbes: number): number | null {
   if (
     !Number.isInteger(completedProbes) ||
     completedProbes < 0 ||
-    completedProbes >= FALLBACK_POLL_MAX_PROBES
+    completedProbes >= MAX_FALLBACK_POLL_PROBES
   ) {
     return null;
   }
@@ -207,7 +199,7 @@ export function getFallbackPollDelayMs(completedProbes: number): number | null {
  */
 export function getNextFallbackPollAt(
   completedProbes: number,
-  nowMs: number = Date.now(),
+  nowMs: number = now(),
 ): number | null {
   const delayMs = getFallbackPollDelayMs(completedProbes);
   if (delayMs === null) {
@@ -223,7 +215,7 @@ export function hasRemainingFallbackProbes(completedProbes: number): boolean {
   return (
     Number.isInteger(completedProbes) &&
     completedProbes >= 0 &&
-    completedProbes < FALLBACK_POLL_MAX_PROBES
+    completedProbes < MAX_FALLBACK_POLL_PROBES
   );
 }
 
@@ -234,7 +226,7 @@ export function hasRemainingFallbackProbes(completedProbes: number): boolean {
  */
 export function isAlarmWallTimeBudgetExceeded(
   startedAtMs: number,
-  nowMs: number = Date.now(),
+  nowMs: number = now(),
   budgetMs: number = ALARM_SAFE_EXECUTION_BUDGET_MS,
 ): boolean {
   return nowMs - startedAtMs >= budgetMs;
@@ -262,7 +254,7 @@ export interface AlarmSafetyOptions {
     rescheduledAt: number,
   ) => void | Promise<void>;
   /**
-   * Optional clock override for deterministic testing (default: `Date.now`).
+   * Optional clock override for deterministic testing (default: `now`).
    */
   readonly now?: () => number;
 }
@@ -307,7 +299,7 @@ export async function runWithAlarmSafety<
     options?.retryThreshold ?? ALARM_RETRY_RESCHEDULE_THRESHOLD;
   const retryExhaustionDelayMs =
     options?.retryExhaustionDelayMs ?? DEFAULT_RETRY_EXHAUSTION_DELAY_MS;
-  const nowFn = options?.now ?? Date.now;
+  const nowFn = options?.now ?? now;
 
   try {
     const result = await work(alarmInfo);

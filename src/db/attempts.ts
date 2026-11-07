@@ -7,12 +7,14 @@
  */
 
 import {
-  GENERATION_ATTEMPTS_SUMMARY_COLUMNS,
-  JUDGE_CALLS_SUMMARY_COLUMNS,
   assertArtifactAndRowSize,
   clampPageLimit,
   measureByteLength,
   toGuardedBlob,
+} from "../lib/guards.ts";
+import {
+  GENERATION_ATTEMPTS_SUMMARY_COLUMNS,
+  JUDGE_CALLS_SUMMARY_COLUMNS,
   withSqlErrorMapping,
   type AttemptResponseArtifactRow,
   type AttemptResponseArtifactSummaryRow,
@@ -24,6 +26,7 @@ import {
   type SchemaSqlStorage,
   type SqlPrimitiveValue,
 } from "./schema";
+import { now } from "../lib/clock.ts";
 import type { ExportHighWaterMarks } from "../types";
 
 export const ATTEMPT_RESPONSE_ARTIFACTS_SUMMARY_COLUMNS =
@@ -873,7 +876,7 @@ export function captureExportHighWaterMarks(sql: SchemaSqlStorage): ExportHighWa
       maxTurnIndex,
       maxAttemptId,
       maxJudgeCallId,
-      capturedAtMs: Date.now(),
+      capturedAtMs: now(),
     };
   });
 }

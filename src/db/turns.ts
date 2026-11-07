@@ -8,12 +8,14 @@
  */
 
 import {
-  TURNS_SUMMARY_COLUMNS,
-  TURN_CANDIDATES_SUMMARY_COLUMNS,
   assertArtifactAndRowSize,
   clampPageLimit,
   measureByteLength,
   toGuardedBlob,
+} from "../lib/guards.ts";
+import {
+  TURNS_SUMMARY_COLUMNS,
+  TURN_CANDIDATES_SUMMARY_COLUMNS,
   withSqlErrorMapping,
   type CandidateStructuralStatus,
   type SchemaSqlStorage,

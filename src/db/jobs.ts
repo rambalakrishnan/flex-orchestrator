@@ -6,6 +6,7 @@
  * passes through untouched.
  */
 
+import { ROW_GUARD_BYTES } from "../constants.ts";
 import {
   assertBranchSnapshotSize,
   assertFileUploadSize,
@@ -13,7 +14,8 @@ import {
   clampPageLimit,
   guardBytes,
   measureByteLength,
-  ROW_BYTE_LIMIT,
+} from "../lib/guards.ts";
+import {
   withSqlErrorMapping,
   type BranchLineageRow,
   type JobFileRow,
@@ -55,7 +57,7 @@ function assertJobRowSize(
     measureByteLength(row.warnings_json) +
     measureByteLength(row.usage_summary_json) +
     measureByteLength(row.last_error_detail);
-  guardBytes(totalBytes, ROW_BYTE_LIMIT, "row_bytes", context);
+  guardBytes(totalBytes, ROW_GUARD_BYTES, "row_bytes", context);
 }
 
 /**

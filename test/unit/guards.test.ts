@@ -2,16 +2,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  ARTIFACT_BYTE_LIMIT,
-  BRANCH_SNAPSHOT_BYTE_LIMIT,
-  FILE_UPLOAD_BYTE_LIMIT,
+  ARTIFACT_ROW_GUARD_BYTES,
   LIST_PAGE_LIMIT_DEFAULT,
   LIST_PAGE_LIMIT_MAX,
   LIST_PAGE_LIMIT_MIN,
-  ROW_BYTE_LIMIT,
+  MAX_BRANCH_SNAPSHOT_BYTES,
+  MAX_FILE_UPLOAD_BYTES,
+  ROW_GUARD_BYTES,
   SQL_MAX_BOUND_PARAMS,
+} from "../../src/constants.ts";
+import {
   ArtifactGuardError,
-  StorageFullError,
   assertArtifactAndRowSize,
   assertArtifactSize,
   assertBranchSnapshotSize,
@@ -19,9 +20,12 @@ import {
   chunkRowsForBindLimit,
   clampPageLimit,
   guardBytes,
-  isSqliteFullError,
   measureByteLength,
   toGuardedBlob,
+} from "../../src/lib/guards.ts";
+import {
+  StorageFullError,
+  isSqliteFullError,
   withSqlErrorMapping,
 } from "../../src/db/schema.ts";
 
@@ -40,10 +44,10 @@ function captureArtifactGuardError(fn: () => unknown): ArtifactGuardError {
 
 describe("limit constants", () => {
   it("matches the architecture guard constants", () => {
-    expect(ARTIFACT_BYTE_LIMIT).toBe(1_500_000);
-    expect(ROW_BYTE_LIMIT).toBe(1_500_000);
-    expect(BRANCH_SNAPSHOT_BYTE_LIMIT).toBe(8_000_000);
-    expect(FILE_UPLOAD_BYTE_LIMIT).toBe(16_000_000);
+    expect(ARTIFACT_ROW_GUARD_BYTES).toBe(1_500_000);
+    expect(ROW_GUARD_BYTES).toBe(1_500_000);
+    expect(MAX_BRANCH_SNAPSHOT_BYTES).toBe(8_000_000);
+    expect(MAX_FILE_UPLOAD_BYTES).toBe(16_000_000);
     expect(LIST_PAGE_LIMIT_MIN).toBe(1);
     expect(LIST_PAGE_LIMIT_MAX).toBe(100);
     expect(LIST_PAGE_LIMIT_DEFAULT).toBe(50);
@@ -86,14 +90,14 @@ describe("measureByteLength", () => {
     expect(error.kind).toBe("artifact_bytes");
     expect(error.context).toBe("invalid_payload_type");
     expect(Number.isNaN(error.actualBytes)).toBe(true);
-    expect(error.limitBytes).toBe(ARTIFACT_BYTE_LIMIT);
+    expect(error.limitBytes).toBe(ARTIFACT_ROW_GUARD_BYTES);
   });
 });
 
 describe("guardBytes", () => {
   it("accepts zero and exactly the limit", () => {
     expect(guardBytes(0)).toBe(0);
-    expect(guardBytes(ARTIFACT_BYTE_LIMIT)).toBe(ARTIFACT_BYTE_LIMIT);
+    expect(guardBytes(ARTIFACT_ROW_GUARD_BYTES)).toBe(ARTIFACT_ROW_GUARD_BYTES);
     expect(guardBytes(10, 10)).toBe(10);
     expect(guardBytes(1, 1, "row_bytes", "row")).toBe(1);
   });
@@ -103,10 +107,10 @@ describe("guardBytes", () => {
   });
 
   it("rejects limit + 1 with default kind/limit/context", () => {
-    const error = captureArtifactGuardError(() => guardBytes(ARTIFACT_BYTE_LIMIT + 1));
+    const error = captureArtifactGuardError(() => guardBytes(ARTIFACT_ROW_GUARD_BYTES + 1));
     expect(error.kind).toBe("artifact_bytes");
-    expect(error.actualBytes).toBe(ARTIFACT_BYTE_LIMIT + 1);
-    expect(error.limitBytes).toBe(ARTIFACT_BYTE_LIMIT);
+    expect(error.actualBytes).toBe(ARTIFACT_ROW_GUARD_BYTES + 1);
+    expect(error.limitBytes).toBe(ARTIFACT_ROW_GUARD_BYTES);
     expect(error.context).toBe("artifact");
     expect(error.code).toBe("ARTIFACT_GUARD_EXCEEDED");
     expect(error.name).toBe("ArtifactGuardError");
@@ -143,21 +147,21 @@ describe("guard-specific asserts", () => {
     {
       label: "assertArtifactSize",
       assertSize: assertArtifactSize,
-      limit: ARTIFACT_BYTE_LIMIT,
+      limit: ARTIFACT_ROW_GUARD_BYTES,
       kind: "artifact_bytes",
       context: "artifact",
     },
     {
       label: "assertBranchSnapshotSize",
       assertSize: assertBranchSnapshotSize,
-      limit: BRANCH_SNAPSHOT_BYTE_LIMIT,
+      limit: MAX_BRANCH_SNAPSHOT_BYTES,
       kind: "branch_snapshot_bytes",
       context: "branch_snapshot",
     },
     {
       label: "assertFileUploadSize",
       assertSize: assertFileUploadSize,
-      limit: FILE_UPLOAD_BYTE_LIMIT,
+      limit: MAX_FILE_UPLOAD_BYTES,
       kind: "file_upload_bytes",
       context: "file_upload",
     },
@@ -230,7 +234,7 @@ describe("assertArtifactAndRowSize", () => {
     expect(error.kind).toBe("artifact_bytes");
     expect(error.context).toBe("turns.row.artifact");
     expect(error.actualBytes).toBe(1_500_001);
-    expect(error.limitBytes).toBe(ARTIFACT_BYTE_LIMIT);
+    expect(error.limitBytes).toBe(ARTIFACT_ROW_GUARD_BYTES);
   });
 
   it("rejects when artifact + metadata exceeds 1_500_000 under the row guard", () => {
@@ -240,7 +244,7 @@ describe("assertArtifactAndRowSize", () => {
     expect(error.kind).toBe("row_bytes");
     expect(error.context).toBe("judge_calls.row");
     expect(error.actualBytes).toBe(1_500_001);
-    expect(error.limitBytes).toBe(ROW_BYTE_LIMIT);
+    expect(error.limitBytes).toBe(ROW_GUARD_BYTES);
 
     const boundaryError = captureArtifactGuardError(() =>
       assertArtifactAndRowSize(1_500_000, 1, "judge_calls.row")

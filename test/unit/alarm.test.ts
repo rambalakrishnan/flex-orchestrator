@@ -3,15 +3,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ALARM_MAX_WALL_TIME_MS,
+  FALLBACK_POLL_FIRST_DELAY_MS,
+  FALLBACK_POLL_SECOND_DELAY_MS,
+  FALLBACK_POLL_STEADY_DELAY_MS,
+  MAX_FALLBACK_POLL_PROBES,
+  PLATFORM_ALARM_MAX_RETRIES,
+  PLATFORM_ALARM_MAX_WALL_TIME_MS,
+} from "../../src/constants.ts";
+import {
   ALARM_RETRY_RESCHEDULE_THRESHOLD,
   ALARM_SAFE_EXECUTION_BUDGET_MS,
   DEFAULT_RETRY_EXHAUSTION_DELAY_MS,
-  FALLBACK_POLL_FIRST_DELAY_MS,
-  FALLBACK_POLL_MAX_PROBES,
-  FALLBACK_POLL_SECOND_DELAY_MS,
-  FALLBACK_POLL_STEADY_DELAY_MS,
-  PLATFORM_ALARM_MAX_RETRIES,
   earliestDeadline,
   ensureAlarmIfNone,
   ensureAlarmNotLaterThan,
@@ -120,7 +122,7 @@ describe("earliestDeadline", () => {
 
 describe("fallback poll timing", () => {
   it("exposes the five-minute, one-minute, five-minute schedule", () => {
-    expect(FALLBACK_POLL_MAX_PROBES).toBe(24);
+    expect(MAX_FALLBACK_POLL_PROBES).toBe(24);
     expect(FALLBACK_POLL_FIRST_DELAY_MS).toBe(300_000);
     expect(FALLBACK_POLL_SECOND_DELAY_MS).toBe(60_000);
     expect(FALLBACK_POLL_STEADY_DELAY_MS).toBe(300_000);
@@ -352,9 +354,9 @@ describe("scheduleNextObligationFromAlarm", () => {
 
 describe("isAlarmWallTimeBudgetExceeded", () => {
   it("exposes a 14-minute safe budget under the 15-minute platform limit", () => {
-    expect(ALARM_MAX_WALL_TIME_MS).toBe(15 * 60 * 1_000);
+    expect(PLATFORM_ALARM_MAX_WALL_TIME_MS).toBe(15 * 60 * 1_000);
     expect(ALARM_SAFE_EXECUTION_BUDGET_MS).toBe(14 * 60 * 1_000);
-    expect(ALARM_SAFE_EXECUTION_BUDGET_MS).toBeLessThan(ALARM_MAX_WALL_TIME_MS);
+    expect(ALARM_SAFE_EXECUTION_BUDGET_MS).toBeLessThan(PLATFORM_ALARM_MAX_WALL_TIME_MS);
     expect(ALARM_RETRY_RESCHEDULE_THRESHOLD).toBe(5);
     expect(PLATFORM_ALARM_MAX_RETRIES).toBe(6);
     expect(ALARM_RETRY_RESCHEDULE_THRESHOLD).toBeLessThan(

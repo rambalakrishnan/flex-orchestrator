@@ -22,7 +22,8 @@ import {
   OPENAI_FILE_UPLOAD_PURPOSE,
   getVerifiedGenerationModel,
 } from "../constants.ts";
-import { assertFileUploadSize } from "../db/schema.ts";
+import { now } from "./clock.ts";
+import { assertFileUploadSize } from "./guards.ts";
 import { HttpError, fetchWithAbort, readBoundedBytes } from "../http.ts";
 import type {
   ContextTier,
@@ -88,7 +89,7 @@ function toExactArrayBuffer(input: Uint8Array | ArrayBuffer): ArrayBuffer {
  */
 export function parseRetryAfterMs(
   retryAfterHeader: string | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = now(),
 ): number | null {
   if (!retryAfterHeader) {
     return null;

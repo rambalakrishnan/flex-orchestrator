@@ -9,11 +9,13 @@
 
 import {
   ArtifactGuardError,
-  WEBHOOK_INBOX_SUMMARY_COLUMNS,
   assertArtifactAndRowSize,
   clampPageLimit,
   measureByteLength,
   toGuardedBlob,
+} from "../lib/guards.ts";
+import {
+  WEBHOOK_INBOX_SUMMARY_COLUMNS,
   withSqlErrorMapping,
   type ResponseRouteRow,
   type SchemaSqlStorage,

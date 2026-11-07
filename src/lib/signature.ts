@@ -15,6 +15,8 @@
  *   fallback for non-Workers test runtimes (never `===`).
  */
 
+import { now } from "./clock.ts";
+
 /** Standard Webhooks delivery-timestamp tolerance in seconds (5 minutes). */
 export const WEBHOOK_TOLERANCE_SECONDS = 300;
 
@@ -57,7 +59,7 @@ export interface WebhookHeaders {
 export interface VerifyWebhookOptions {
   /**
    * Current Unix timestamp in milliseconds used to validate the delivery window.
-   * Defaults to `Date.now()`.
+   * Defaults to the injectable clock's `now()`.
    */
   readonly nowMs?: number;
   /**
@@ -303,7 +305,7 @@ export function verifyWebhookTimestamp(
     };
   }
 
-  const nowMs = options?.nowMs ?? Date.now();
+  const nowMs = options?.nowMs ?? now();
   const toleranceSeconds =
     options?.toleranceSeconds ?? WEBHOOK_TOLERANCE_SECONDS;
   const nowSeconds = Math.floor(nowMs / 1000);

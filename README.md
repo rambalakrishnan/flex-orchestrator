@@ -48,10 +48,7 @@ new_sqlite_classes = ["JobDO", "RouterDO", "RegistryDO"]
 FILE_RETENTION_SECONDS = "604800"
 JUDGE_DEFAULT_MODEL = "your-judge-model"
 
-[secrets]
-required = [
-  "HOOKS_HOST"
-]
+# HOOKS_HOST is configured as a runtime variable in the Cloudflare Dashboard (README §2).
 ```
 
 `FILE_RETENTION_SECONDS` controls file cleanup retention. `JUDGE_DEFAULT_MODEL` seeds the judge panel’s model field.

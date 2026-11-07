@@ -7,10 +7,10 @@
  * `DurableObject<Env>` / `Cloudflare.Env`) resolve identically without drift.
  *
  * Note:
- * - Secrets (`HOOKS_HOST`, `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and dynamic
- *   judge secrets resolved via `getEnvSecret`) are raw `string` bindings at the
- *   Worker boundary; never `CryptoKey`s (which must be imported inside handlers
- *   because Durable Objects evict in-memory state).
+ * - Secrets (`OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and dynamic judge secrets
+ *   resolved via `getEnvSecret`) and the runtime variable `HOOKS_HOST` are raw
+ *   `string` bindings at the Worker boundary; never `CryptoKey`s (which must be
+ *   imported inside handlers because Durable Objects evict in-memory state).
  * - No separate application-host binding is defined: the webhook ingress is served
  *   only on `env.HOOKS_HOST` (`POST /openai`), and any other valid custom domain
  *   attached in the Cloudflare Dashboard serves the Access-protected application and assets.
@@ -30,7 +30,7 @@ declare namespace Cloudflare {
     /** Global job-index, file-catalogue, upload, and retention SQLite Durable Object namespace (`RegistryDO`). */
     readonly REGISTRY_DO: DurableObjectNamespace;
 
-    /** Public webhook hostname configured as a secret/variable (only `POST /openai` is served on this host). */
+    /** Public webhook hostname configured as a runtime variable (only `POST /openai` is served on this host). */
     readonly HOOKS_HOST: string;
 
     /** Retention window in seconds (decimal string, e.g. `"604800"`) for unreferenced catalogued files. */
@@ -61,14 +61,4 @@ declare namespace Cloudflare {
  * Global `Env` binding contract shared across the Worker entrypoint, HTTP route
  * handlers (`satisfies ExportedHandler<Env>`), and Durable Object classes.
  */
-interface Env extends Cloudflare.Env {
-  readonly ASSETS: Fetcher;
-  readonly JOB_DO: DurableObjectNamespace;
-  readonly ROUTER_DO: DurableObjectNamespace;
-  readonly REGISTRY_DO: DurableObjectNamespace;
-  readonly HOOKS_HOST: string;
-  readonly FILE_RETENTION_SECONDS: string;
-  readonly JUDGE_DEFAULT_MODEL: string;
-  readonly OPENAI_API_KEY: string;
-  readonly OPENAI_WEBHOOK_SECRET: string;
-}
+interface Env extends Cloudflare.Env {}

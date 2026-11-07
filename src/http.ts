@@ -5,12 +5,15 @@
  * explicit AbortController lifecycle cleanup, and safe Cloudflare property access.
  */
 
+import { DEFAULT_MAX_JSON_BODY_BYTES } from "./constants.ts";
+
 /**
- * Default maximum JSON payload size in bytes (1,500,000 bytes, aligned with the
- * system-wide artifact guard). Callers may pass a smaller or larger explicit cap
- * (e.g., 8,000,000 bytes for branch snapshot imports).
+ * Default maximum JSON payload size in bytes (262,144 bytes, sufficient for control
+ * payloads; the single source of truth is `DEFAULT_MAX_JSON_BODY_BYTES` in
+ * `src/constants.ts`). Callers may pass an explicit larger cap (e.g., 8,000,000 bytes
+ * for branch snapshot imports).
  */
-export const DEFAULT_MAX_JSON_BYTES = 1_500_000;
+export const DEFAULT_MAX_JSON_BYTES = DEFAULT_MAX_JSON_BODY_BYTES;
 
 /**
  * Maximum post-response execution tail granted by `ctx.waitUntil()` in Workers (30 seconds).
@@ -107,14 +110,15 @@ export function errorResponse(
 
 /**
  * Converts an unknown caught error into a standardized JSON `Response`.
- * Preserves status and code if the error is an `HttpError`.
+ * Preserves status and code if the error is an `HttpError`. Every other throwable
+ * becomes a 500 `internal_error` with a fixed literal message — never the raw
+ * `err.message`, stack, or details, which could leak credentials or internals.
  */
 export function toErrorResponse(err: unknown): Response {
   if (err instanceof HttpError) {
     return errorResponse(err.status, err.code, err.message, err.details);
   }
-  const message = err instanceof Error ? err.message : "Internal server error";
-  return errorResponse(500, "internal_error", message);
+  return errorResponse(500, "internal_error", "Internal Server Error");
 }
 
 export function badRequest(message: string, code = "bad_request", details?: unknown): Response {
@@ -208,7 +212,7 @@ export function streamResponse(
  */
 export interface ReadBodyOptions {
   /**
-   * Maximum allowed byte length. Defaults to `DEFAULT_MAX_JSON_BYTES` (1,500,000).
+   * Maximum allowed byte length. Defaults to `DEFAULT_MAX_JSON_BYTES` (262,144).
    */
   maxBytes?: number;
   /**

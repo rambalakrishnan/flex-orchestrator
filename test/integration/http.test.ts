@@ -161,8 +161,19 @@ describe("readBoundedBytes", () => {
     expect(pulls).toBe(0);
   });
 
+  it("rejects a DEFAULT_MAX_JSON_BYTES + 1 body under the default cap", async () => {
+    expect(DEFAULT_MAX_JSON_BYTES).toBe(262_144);
+    const overflowBytes = new Uint8Array(DEFAULT_MAX_JSON_BYTES + 1);
+    expect(overflowBytes.byteLength).toBe(262_145);
+
+    const err = await rejectionOf(readBoundedBytes(new Response(overflowBytes)));
+
+    const httpErr = expectHttpError(err, 413, "payload_too_large");
+    expect(httpErr.details).toEqual({ max_bytes: DEFAULT_MAX_JSON_BYTES });
+  });
+
   it("honors an explicit non-default cap at the 8,000,000-byte branch-snapshot boundary", async () => {
-    const snapshotBytes = new Uint8Array(DEFAULT_MAX_JSON_BYTES + 1);
+    const snapshotBytes = new Uint8Array(1_500_001);
     expect(snapshotBytes.byteLength).toBe(1_500_001);
 
     const defaultErr = await rejectionOf(
@@ -415,12 +426,26 @@ describe("jsonResponse / errorResponse / toErrorResponse", () => {
     });
   });
 
-  it("preserves the message of an unexpected Error under internal_error", async () => {
+  it("hides the message of an unexpected Error behind the literal internal_error message", async () => {
     const response = toErrorResponse(new Error("database exploded"));
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
-      error: { code: "internal_error", message: "database exploded" },
+      error: { code: "internal_error", message: "Internal Server Error" },
+    });
+  });
+
+  it("never leaks credential-like substrings from an unexpected Error", async () => {
+    const response = toErrorResponse(
+      new Error("upstream rejected Authorization: Bearer sk-live-secret"),
+    );
+
+    expect(response.status).toBe(500);
+    const body = await response.text();
+    expect(body).not.toContain("sk-live-secret");
+    expect(body).not.toContain("Authorization");
+    expect(JSON.parse(body)).toEqual({
+      error: { code: "internal_error", message: "Internal Server Error" },
     });
   });
 
@@ -429,7 +454,7 @@ describe("jsonResponse / errorResponse / toErrorResponse", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
-      error: { code: "internal_error", message: "Internal server error" },
+      error: { code: "internal_error", message: "Internal Server Error" },
     });
   });
 });

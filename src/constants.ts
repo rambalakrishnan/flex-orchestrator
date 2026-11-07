@@ -252,6 +252,9 @@ export type OpenAIWebhookEventType = (typeof OPENAI_WEBHOOK_EVENT_TYPES)[number]
 /** Webhook endpoint pathname served exclusively on the configured `env.HOOKS_HOST`. */
 export const WEBHOOK_OPENAI_PATH = "/openai" as const;
 
+/** Marginal token preview pathname served on the application host. */
+export const TOKEN_PREVIEW_PATH = "/api/tokens/preview" as const;
+
 /** Canonical singleton Durable Object names for global coordinators. */
 export const REGISTRY_DO_NAME = "global-registry" as const;
 export const ROUTER_DO_NAME = "global-router" as const;

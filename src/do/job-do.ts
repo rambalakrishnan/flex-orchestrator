@@ -22,6 +22,7 @@ import {
 import {
   getBranchLineage,
   getJob,
+  markBranchActivationFlags,
   insertBranchLineage,
   insertJob,
   listJobFiles,
@@ -198,7 +199,13 @@ interface RegistryDoRpc {
     readonly createdAtMs: number;
     readonly updatedAtMs: number;
   }): Promise<void>;
-  updateJobIndexStatus(jobId: JobId, status: JobRow["status"], revision: number): Promise<void>;
+  updateJobIndexStatus(
+    jobId: JobId,
+    status: JobRow["status"],
+    revision: number,
+    currentTurnIndex: number,
+    acceptedTurnCount: number,
+  ): Promise<void>;
   protectJobFileRefs(jobId: JobId, fileIds: readonly FileId[]): Promise<void>;
   releaseJobFileRefs(jobId: JobId): Promise<void>;
   getFile(fileId: FileId): Promise<FileCatalogueRecord | null>;
@@ -209,7 +216,8 @@ interface RouterDoRpc {
 }
 
 interface JobDoRpc {
-  getState(): Promise<JobStateResponse>;
+  getState(): Promise<JobStateResponse | null>;
+  supersedeParent(epoch: number, childId: string): Promise<boolean>;
 }
 
 interface GenerationDispatchPayload {
@@ -909,11 +917,14 @@ export class JobDO extends DurableObject<Env> {
     await this.scheduleEarliestObligation();
     await this.startNextTurnIfEligible();
 
-    return this.getState();
+    return this.requireState();
   }
 
-  async getState(): Promise<JobStateResponse> {
-    const jobRow = requireJob(this.sql);
+  async getState(): Promise<JobStateResponse | null> {
+    const jobRow = getJob(this.sql);
+    if (jobRow === null) {
+      return null;
+    }
     const lineage =
       jobRow.parent_job_id === null ? null : getBranchLineage(this.sql, jobRow.job_id);
     const job = jobRowToRecord(jobRow, lineage);
@@ -988,7 +999,7 @@ export class JobDO extends DurableObject<Env> {
       await this.startNextTurnIfEligible();
     }
 
-    return this.getState();
+    return this.requireState();
   }
 
   async applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse> {
@@ -1004,7 +1015,7 @@ export class JobDO extends DurableObject<Env> {
         await this.cancelJob(job, decision.reason);
         break;
     }
-    return this.getState();
+    return this.requireState();
   }
 
   async captureBranchSnapshot(
@@ -1171,6 +1182,7 @@ export class JobDO extends DurableObject<Env> {
 
     const parentState = await this.jobStub(snapshot.parentJob.jobId).getState();
     if (
+      parentState === null ||
       parentState.job.revision !== snapshot.parentJob.revision ||
       !this.isQuiescentRecord(parentState)
     ) {
@@ -1453,16 +1465,17 @@ export class JobDO extends DurableObject<Env> {
       });
     });
 
+    const parentSuperseded = await this.jobStub(snapshot.parentJob.jobId).supersedeParent(
+      snapshot.parentJob.revision,
+      branchJobId,
+    );
+    markBranchActivationFlags(this.sql, branchJobId, { parentSuperseded });
+
     const branchRow = requireJob(this.sql, branchJobId);
     await this.registryStub().registerJob(this.jobSummaryFromRow(branchRow));
-    await this.registryStub().updateJobIndexStatus(
-      snapshot.parentJob.jobId,
-      "superseded",
-      snapshot.parentJob.revision
-    );
     await this.scheduleEarliestObligation();
 
-    return { kind: "created", branchJobId, parentSuperseded: true };
+    return { kind: "created", branchJobId, parentSuperseded };
   }
 
   async receiveWebhookDelivery(event: VerifiedWebhookEvent): Promise<void> {
@@ -1656,7 +1669,13 @@ export class JobDO extends DurableObject<Env> {
   }
 
   private async publishJobIndex(row: JobRow): Promise<void> {
-    await this.registryStub().updateJobIndexStatus(row.job_id, row.status, row.revision);
+    await this.registryStub().updateJobIndexStatus(
+      row.job_id,
+      row.status,
+      row.revision,
+      row.current_turn_index,
+      this.countAcceptedTurns(),
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -1944,11 +1963,75 @@ export class JobDO extends DurableObject<Env> {
       status: row.status,
       model: row.model,
       currentTurnIndex: row.current_turn_index,
-      acceptedTurnCount: row.accepted_turn_index,
+      acceptedTurnCount: this.countAcceptedTurns(),
       totalEstimatedCostUsd: usage.totalEstimatedCostUsd,
       createdAtMs: parseIsoMs(row.created_at),
       updatedAtMs: parseIsoMs(row.updated_at),
     };
+  }
+
+  private countAcceptedTurns(): number {
+    const rows = this.sql
+      .exec<{ total: number }>(
+        "SELECT COUNT(*) AS total FROM turns WHERE status IN ('accepted', 'accepted_with_warning')",
+      )
+      .toArray();
+    return rows[0]?.total ?? 0;
+  }
+
+  private async requireState(): Promise<JobStateResponse> {
+    const state = await this.getState();
+    if (state === null) {
+      throw new Error("Job record not found");
+    }
+    return state;
+  }
+
+  /**
+   * Called by a child branch on its parent. Supersedes the parent only when the
+   * parent is still quiescent and its revision is exactly `epoch` (the revision
+   * captured into the branch snapshot). Idempotent once superseded.
+   */
+  async supersedeParent(epoch: number, childId: string): Promise<boolean> {
+    if (!Number.isSafeInteger(epoch) || epoch < 1) {
+      throw new RangeError("epoch must be a positive safe integer");
+    }
+    if (typeof childId !== "string" || childId.trim().length === 0) {
+      throw new Error("childId must be a non-empty string");
+    }
+    const branchJobId = childId;
+    const job = getJob(this.sql);
+    if (job === null) {
+      return false;
+    }
+    if (job.status === "superseded") {
+      return true;
+    }
+    const state = await this.getState();
+    if (state === null || state.job.revision !== epoch || !this.isQuiescentRecord(state)) {
+      return false;
+    }
+
+    const nowIso = toIso(now());
+    const warnings = readStringArray(job.warnings_json);
+    const marker = `superseded_by:${branchJobId}`;
+    if (!warnings.includes(marker)) {
+      warnings.push(marker);
+    }
+
+    this.storage.transactionSync(() => {
+      updateJobStatusAndRevision(this.sql, {
+        jobId: job.job_id,
+        status: "superseded",
+        activeAttemptId: null,
+        warningsJson: JSON.stringify(warnings),
+        updatedAt: nowIso,
+      });
+    });
+
+    const updated = requireJob(this.sql, job.job_id);
+    await this.publishAndSchedule(updated);
+    return true;
   }
 
   private isJobQuiescent(job: JobRow): boolean {

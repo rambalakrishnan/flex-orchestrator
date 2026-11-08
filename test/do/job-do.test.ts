@@ -28,7 +28,8 @@ import type {
 
 interface JobDoTestStub {
   createJob(command: CreateJobCommand): Promise<JobStateResponse>;
-  getState(): Promise<JobStateResponse>;
+  getState(): Promise<JobStateResponse | null>;
+  supersedeParent(epoch: number, childId: string): Promise<boolean>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
   captureBranchSnapshot(
@@ -151,6 +152,35 @@ afterEach(async () => {
   await abortAllDurableObjects();
 });
 
+describe("JobDO contract amendments", () => {
+  it("returns null for a missing job and supersedes a quiescent parent exactly once", async () => {
+    const missing = stubFor(nextJobId());
+    expect(await missing.getState()).toBeNull();
+
+    const jobId = nextJobId();
+    const stub = stubFor(jobId);
+    const created = await stub.createJob({
+      jobId,
+      title: "supersede me",
+      config: JOB_CONFIG,
+      initialTurns: [],
+    });
+    const epoch = created.job.revision;
+
+    expect(await stub.supersedeParent(epoch + 1, "child-stale")).toBe(false);
+
+    expect(await stub.supersedeParent(epoch, "child-1")).toBe(true);
+    const after = await stub.getState();
+    if (after === null) throw new Error("expected superseded state");
+    expect(after.job.status).toBe("superseded");
+    expect(after.job.revision).toBe(epoch + 1);
+    expect(after.job.warningMessages).toContain("superseded_by:child-1");
+
+    // Idempotent once superseded, even with the original epoch.
+    expect(await stub.supersedeParent(epoch, "child-1")).toBe(true);
+  });
+});
+
 describe("JobDO command surface", () => {
   it("creates, reads, and rejects duplicate jobs", async () => {
     const jobId = nextJobId();
@@ -194,6 +224,7 @@ describe("JobDO command surface", () => {
     expect(duplicateMessage).toContain("already exists");
 
     const state = await stub.getState();
+    if (state === null) throw new Error("expected job state");
     expect(state.job.title).toBe("first job");
   });
 
@@ -282,6 +313,7 @@ describe("JobDO generation lifecycle", () => {
     });
 
     const settled = await stub.getState();
+    if (settled === null) throw new Error("expected settled state");
     expect(settled.job.status).toBe("completed");
     expect(settled.turns[0]!.status).toBe("accepted");
     expect(settled.turns[0]!.acceptedResponseId).toBe("resp_1");
@@ -333,6 +365,7 @@ describe("JobDO generation lifecycle", () => {
     expect(outcome.parentSuperseded).toBe(true);
 
     const branchState = await child.getState();
+    if (branchState === null) throw new Error("expected branch state");
     expect(branchState.job.status).toBe("ready");
     expect(branchState.job.branchProvenance?.parentJobId).toBe(parentJobId);
     expect(branchState.job.acceptedTurnCount).toBe(1);

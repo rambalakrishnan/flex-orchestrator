@@ -43,6 +43,8 @@ function assertJobRowSize(
     | "title"
     | "model"
     | "judge_config_json"
+    | "developer_prompt"
+    | "developer_file_ids_json"
     | "warnings_json"
     | "usage_summary_json"
     | "last_error_detail"
@@ -54,6 +56,8 @@ function assertJobRowSize(
     measureByteLength(row.title) +
     measureByteLength(row.model) +
     measureByteLength(row.judge_config_json) +
+    measureByteLength(row.developer_prompt) +
+    measureByteLength(row.developer_file_ids_json) +
     measureByteLength(row.warnings_json) +
     measureByteLength(row.usage_summary_json) +
     measureByteLength(row.last_error_detail);
@@ -78,6 +82,8 @@ export function insertJob(sql: SchemaSqlStorage, row: JobRow): JobRow {
         cache_ttl,
         web_search,
         judge_config_json,
+        developer_prompt,
+        developer_file_ids_json,
         continuation_budget,
         continuations_used,
         auto_retry_budget,
@@ -101,7 +107,8 @@ export function insertJob(sql: SchemaSqlStorage, row: JobRow): JobRow {
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?
       )`,
       row.job_id,
       row.title,
@@ -112,6 +119,8 @@ export function insertJob(sql: SchemaSqlStorage, row: JobRow): JobRow {
       row.cache_ttl,
       row.web_search,
       row.judge_config_json,
+      row.developer_prompt,
+      row.developer_file_ids_json,
       row.continuation_budget,
       row.continuations_used,
       row.auto_retry_budget,
@@ -222,6 +231,8 @@ export function updateJobStatusAndRevision(
         title: current.title,
         model: current.model,
         judge_config_json: current.judge_config_json,
+        developer_prompt: current.developer_prompt,
+        developer_file_ids_json: current.developer_file_ids_json,
         warnings_json: nextWarningsJson,
         usage_summary_json: nextUsageSummaryJson,
         last_error_detail: nextLastErrorDetail,

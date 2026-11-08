@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   cache_ttl TEXT NOT NULL CHECK (cache_ttl IN ('30m', '12h', '24h', 'nocache')),
   web_search INTEGER NOT NULL DEFAULT 0 CHECK (web_search IN (0, 1)),
   judge_config_json TEXT NOT NULL CHECK (json_valid(judge_config_json)),
+  developer_prompt TEXT NOT NULL DEFAULT '',
+  developer_file_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(developer_file_ids_json)),
   continuation_budget INTEGER NOT NULL DEFAULT 3 CHECK (continuation_budget = 3),
   continuations_used INTEGER NOT NULL DEFAULT 0 CHECK (continuations_used >= 0 AND continuations_used <= 3),
   auto_retry_budget INTEGER NOT NULL DEFAULT 1 CHECK (auto_retry_budget = 1),
@@ -205,6 +207,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     length(title) +
     length(model) +
     length(judge_config_json) +
+    length(developer_prompt) +
+    length(developer_file_ids_json) +
     length(warnings_json) +
     length(usage_summary_json) +
     COALESCE(length(last_error_detail), 0) <= ${ARTIFACT_ROW_GUARD_BYTES}
@@ -756,6 +760,8 @@ export interface JobRow extends Record<string, SqlPrimitiveValue> {
   cache_ttl: CacheTtlOption;
   web_search: number;
   judge_config_json: string;
+  developer_prompt: string;
+  developer_file_ids_json: string;
   continuation_budget: number;
   continuations_used: number;
   auto_retry_budget: number;

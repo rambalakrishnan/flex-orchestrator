@@ -11,6 +11,8 @@
     <header>
       <h1>Flex Orchestrator</h1>
       <p id="app-status">Idle</p>
+      <button type="button" id="health-check">Health Check</button>
+      <p id="health-status" role="status" aria-live="polite"></p>
     </header>
 
     <section aria-labelledby="create-job-heading">
@@ -66,6 +68,18 @@
             <option value="30m">30 minutes</option>
             <option value="nocache">No cache</option>
           </select>
+        </p>
+        <p>
+          <label for="job-previous-response-id">External previous_response_id (optional)</label>
+          <input
+            id="job-previous-response-id"
+            name="initialPreviousResponseId"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="resp_..."
+          />
+          <small class="help-text">Seeds the stateful continuity anchor for turn 1. An accepted turn 1 replaces it, and the value is recorded in the job warnings.</small>
         </p>
         <p>
           <input id="job-web-search" name="webSearch" type="checkbox" />

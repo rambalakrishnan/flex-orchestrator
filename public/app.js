@@ -11,6 +11,8 @@ const judgeEnabledCheckbox = document.getElementById("judge-enabled");
 const judgePanel = document.getElementById("judge-panel");
 const judgeInjectFailCheckbox = document.getElementById("judge-inject-fail");
 const judgeInjectPassCheckbox = document.getElementById("judge-inject-pass");
+const healthCheckButton = document.getElementById("health-check");
+const healthStatus = document.getElementById("health-status");
 
 const MAX_AUTO_CONTINUATIONS = 3;
 const MAX_AUTO_RETRIES = 1;
@@ -48,11 +50,68 @@ function checkedRadioValue(name, label) {
   return checked.value;
 }
 
+function formatErrorDetailValue(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatErrorDetails(details) {
+  if (details === null || details === undefined) return "";
+  if (typeof details !== "object") return formatErrorDetailValue(details);
+  if (Array.isArray(details)) {
+    if (details.length === 0) return "";
+    return details.map(formatErrorDetailValue).join(", ");
+  }
+  const entries = Object.entries(details);
+  if (entries.length === 0) return "";
+  return entries
+    .map(([key, value]) => key + "=" + formatErrorDetailValue(value))
+    .join(", ");
+}
+
 async function errorMessage(response) {
   try {
     const body = await response.json();
-    const message = body?.error?.message;
-    if (typeof message === "string" && message.length > 0) return message;
+    const error = body !== null && typeof body === "object" ? body.error : null;
+    const message =
+      error !== null &&
+      typeof error === "object" &&
+      typeof error.message === "string" &&
+      error.message.length > 0
+        ? error.message
+        : null;
+    const code =
+      error !== null &&
+      typeof error === "object" &&
+      typeof error.code === "string" &&
+      error.code.length > 0
+        ? error.code
+        : null;
+    const detailsText =
+      error !== null && typeof error === "object" ? formatErrorDetails(error.details) : "";
+    let text = message;
+    if (text === null && code !== null) text = code;
+    if (
+      text === null &&
+      body !== null &&
+      typeof body === "object" &&
+      typeof body.message === "string" &&
+      body.message.length > 0
+    ) {
+      text = body.message;
+    }
+    if (text !== null) {
+      if (code !== null && message !== null) text = "[" + code + "] " + text;
+      if (detailsText.length > 0) text += " \u2014 " + detailsText;
+      return text;
+    }
   } catch {
     // Non-JSON error bodies use the status line below.
   }
@@ -267,6 +326,7 @@ function buildCreateJobCommand(params) {
       judge: buildJudgeConfig(),
     },
     initialTurns: params.initialTurns,
+    initialPreviousResponseId: value("job-previous-response-id").trim() || null,
   };
 }
 
@@ -403,6 +463,38 @@ async function countTurnTokens(button) {
 
 let creatingJob = false;
 
+function positiveTurnIndexOrNull(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** Reports the first submitted response ID returned by a successful create. */
+function describeCreatedJobState(state) {
+  if (state !== null && typeof state === "object") {
+    const activeAttempt = state.activeAttempt;
+    if (activeAttempt !== null && typeof activeAttempt === "object") {
+      const responseId = activeAttempt.responseId;
+      if (typeof responseId === "string" && responseId.length > 0) {
+        const job = state.job;
+        const turnIndex =
+          positiveTurnIndexOrNull(activeAttempt.turnIndex) ??
+          (job !== null && typeof job === "object"
+            ? positiveTurnIndexOrNull(job.currentTurnIndex)
+            : null);
+        if (turnIndex !== null) {
+          return (
+            "Job created. Turn " +
+            turnIndex +
+            " submitted (response " +
+            responseId +
+            ")."
+          );
+        }
+      }
+    }
+  }
+  return "Job created.";
+}
+
 async function createJob(event) {
   event.preventDefault();
   if (creatingJob) return;
@@ -437,10 +529,17 @@ async function createJob(event) {
       return;
     }
 
+    let state = null;
+    try {
+      state = await response.json();
+    } catch {
+      // A missing or malformed state body still means the job was accepted.
+    }
+
     form.reset();
     resetTurns();
     updateJudgePanel();
-    setStatus("Job created.");
+    setStatus(describeCreatedJobState(state));
     await refreshJobs();
   } catch (error) {
     setStatus("Error: " + describeError(error));
@@ -458,15 +557,337 @@ async function refreshJobs() {
   }
 }
 
-async function openJobDetail(jobId) {
+const DETAIL_REFRESH_INTERVAL_MS = 12000;
+
+let detailJobId = null;
+let detailRefreshTimer = null;
+let dialogActionRunning = false;
+
+function stopDetailRefresh() {
+  if (detailRefreshTimer !== null) {
+    clearInterval(detailRefreshTimer);
+    detailRefreshTimer = null;
+  }
+}
+
+function startDetailRefresh() {
+  stopDetailRefresh();
+  const jobId = detailJobId;
+  if (jobId === null) return;
+  detailRefreshTimer = setInterval(() => {
+    if (!dialog.open || detailJobId !== jobId) {
+      stopDetailRefresh();
+      return;
+    }
+    if (dialogActionRunning) return;
+    void refreshDetailFragment(jobId, true);
+  }, DETAIL_REFRESH_INTERVAL_MS);
+}
+
+async function refreshDetailFragment(jobId, silent) {
+  if (silent && dialogActionRunning) return;
   try {
     const response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/fragment");
-    if (response.ok) dialogBody.innerHTML = await response.text();
-    else dialogBody.textContent = "Error: " + (await errorMessage(response));
+    if (detailJobId !== jobId) return;
+    if (silent && dialogActionRunning) return;
+    if (response.ok) {
+      const fragment = await response.text();
+      if (detailJobId !== jobId) return;
+      const healthRegion = dialogBody.querySelector(".dialog-health");
+      const actionError = dialogBody.querySelector(".dialog-action-error");
+      dialogBody.innerHTML = fragment;
+      if (healthRegion instanceof HTMLElement) dialogBody.appendChild(healthRegion);
+      if (actionError instanceof HTMLElement) dialogBody.prepend(actionError);
+      return;
+    }
+    if (!silent) {
+      dialogBody.textContent = "Error: " + (await errorMessage(response));
+    }
   } catch {
-    dialogBody.textContent = "Error: network request failed.";
+    if (!silent && detailJobId === jobId) {
+      dialogBody.textContent = "Error: network request failed.";
+    }
   }
-  dialog.showModal();
+}
+
+async function openJobDetail(jobId) {
+  detailJobId = jobId;
+  stopDetailRefresh();
+  dialogBody.textContent = "Loading\u2026";
+  if (!dialog.open) dialog.showModal();
+  await refreshDetailFragment(jobId, false);
+  if (detailJobId === jobId) startDetailRefresh();
+}
+
+function describeHealthProbe(probe) {
+  if (probe === null || typeof probe !== "object") return "unavailable";
+
+  const parts = [];
+  parts.push(probe.ok === true ? "ok" : "error");
+  if (typeof probe.latencyMs === "number" && Number.isFinite(probe.latencyMs)) {
+    parts.push(Math.max(0, Math.round(probe.latencyMs)) + " ms");
+  }
+
+  const status = probe.status;
+  if (status !== null && typeof status === "object") {
+    const indicator =
+      typeof status.indicator === "string" && status.indicator.length > 0
+        ? status.indicator
+        : "unknown";
+    const description = typeof status.description === "string" ? status.description : "";
+    parts.push(
+      "status: " + indicator + (description.length > 0 ? " \u2014 " + description : ""),
+    );
+  } else {
+    parts.push("status: not reported");
+  }
+
+  const models = probe.models;
+  if (models !== null && typeof models === "object") {
+    let modelsText = models.ok === true ? "models: ok" : "models: unavailable";
+    if (typeof models.count === "number" && Number.isFinite(models.count)) {
+      modelsText += " (" + models.count + ")";
+    }
+    if (models.modelPresent === true) modelsText += ", model present";
+    else if (models.modelPresent === false) modelsText += ", model missing";
+    if (typeof models.error === "string" && models.error.length > 0) {
+      modelsText += ", " + models.error;
+    }
+    parts.push(modelsText);
+  }
+
+  if (typeof probe.error === "string" && probe.error.length > 0) {
+    parts.push("error: " + probe.error);
+  }
+  return parts.join(" \u00b7 ");
+}
+
+function healthLines(health) {
+  const mainProbe = health !== null && typeof health === "object" ? health.main : null;
+  const judgeProbe = health !== null && typeof health === "object" ? health.judge : null;
+  const lines = [{ label: "Main", text: describeHealthProbe(mainProbe) }];
+
+  if (judgeProbe === null || judgeProbe === undefined) {
+    lines.push({ label: "Judge", text: "not checked" });
+  } else if (typeof judgeProbe === "object" && judgeProbe.skipped === true) {
+    lines.push({ label: "Judge", text: "skipped (judge disabled)" });
+  } else {
+    lines.push({ label: "Judge", text: describeHealthProbe(judgeProbe) });
+  }
+  return lines;
+}
+
+function healthState(health) {
+  if (
+    health === null ||
+    typeof health !== "object" ||
+    health.main === null ||
+    typeof health.main !== "object"
+  ) {
+    return "error";
+  }
+  const probes = [health.main];
+  if (health.judge !== null && typeof health.judge === "object") probes.push(health.judge);
+  for (const probe of probes) {
+    if (probe.skipped === true) continue;
+    if (probe.ok !== true) return "error";
+  }
+  return "ok";
+}
+
+function ensureDialogHealthRegion() {
+  const existing = dialogBody.querySelector(".dialog-health");
+  if (existing instanceof HTMLElement) {
+    existing.hidden = false;
+    return existing;
+  }
+  const region = document.createElement("section");
+  region.className = "dialog-health";
+  region.hidden = false;
+  region.setAttribute("role", "status");
+  region.setAttribute("aria-live", "polite");
+  dialogBody.appendChild(region);
+  return region;
+}
+
+function createHealthProbeRow(labelText, valueText) {
+  const row = document.createElement("div");
+  row.className = "health-probe";
+  const label = document.createElement("span");
+  label.className = "health-label";
+  label.textContent = labelText;
+  const value = document.createElement("span");
+  value.textContent = valueText;
+  row.append(label, value);
+  return row;
+}
+
+function renderDialogHealth(region, health) {
+  const title = document.createElement("h3");
+  title.className = "dialog-health-title";
+  title.textContent = "Provider health";
+  const rows = healthLines(health).map((line) =>
+    createHealthProbeRow(line.label, line.text),
+  );
+  region.replaceChildren(title, ...rows);
+  region.dataset.state = healthState(health);
+}
+
+async function runDialogHealthCheck(jobId) {
+  const region = ensureDialogHealthRegion();
+  region.dataset.state = "";
+  region.textContent = "Checking provider health\u2026";
+  try {
+    const response = await fetch("/api/health?jobId=" + encodeURIComponent(jobId));
+    if (!response.ok) {
+      region.textContent = "Error: " + (await errorMessage(response));
+      region.dataset.state = "error";
+      return;
+    }
+    let health = null;
+    try {
+      health = await response.json();
+    } catch {
+      throw new Error("health response was not JSON.");
+    }
+    if (health === null || typeof health !== "object") {
+      throw new Error("health response was not a JSON object.");
+    }
+    renderDialogHealth(region, health);
+  } catch (error) {
+    region.textContent = "Error: " + describeError(error);
+    region.dataset.state = "error";
+  }
+}
+
+function clearDialogActionError() {
+  const region = dialogBody.querySelector(".dialog-action-error");
+  if (region !== null) region.remove();
+}
+
+function showDialogActionError(message) {
+  let region = dialogBody.querySelector(".dialog-action-error");
+  if (!(region instanceof HTMLElement)) {
+    region = document.createElement("p");
+    region.className = "dialog-action-error error-text";
+    region.setAttribute("role", "alert");
+    dialogBody.prepend(region);
+  }
+  region.textContent = "Error: " + message;
+}
+
+async function handleDialogAction(control) {
+  if (!(control instanceof HTMLElement)) return;
+  const action = control.getAttribute("data-action");
+  if (action !== "resume-job" && action !== "retry-turn" && action !== "check-health") {
+    return;
+  }
+  if (dialogActionRunning) return;
+
+  const jobId = control.getAttribute("data-job-id") ?? detailJobId;
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    showDialogActionError("Job identifier is missing.");
+    return;
+  }
+
+  const button = control instanceof HTMLButtonElement ? control : null;
+  dialogActionRunning = true;
+  clearDialogActionError();
+  if (button !== null) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  }
+
+  try {
+    if (action === "check-health") {
+      await runDialogHealthCheck(jobId);
+      return;
+    }
+
+    let response;
+    if (action === "resume-job") {
+      response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/resume", {
+        method: "POST",
+      });
+    } else {
+      const rawTurnIndex = control.getAttribute("data-turn-index");
+      const turnIndex = Number(rawTurnIndex);
+      if (rawTurnIndex === null || !Number.isSafeInteger(turnIndex) || turnIndex <= 0) {
+        throw new Error("Turn index is missing or invalid.");
+      }
+      response = await fetch(
+        "/api/jobs/" +
+          encodeURIComponent(jobId) +
+          "/turns/" +
+          encodeURIComponent(String(turnIndex)) +
+          "/retry",
+        { method: "POST" },
+      );
+    }
+
+    if (!response.ok) {
+      showDialogActionError(await errorMessage(response));
+      return;
+    }
+
+    if (detailJobId === jobId) {
+      await refreshDetailFragment(jobId, false);
+    }
+    await refreshJobs();
+  } catch (error) {
+    showDialogActionError(describeError(error));
+  } finally {
+    dialogActionRunning = false;
+    if (button !== null) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+}
+
+async function checkHealth() {
+  if (
+    !(healthCheckButton instanceof HTMLButtonElement) ||
+    !(healthStatus instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  healthCheckButton.disabled = true;
+  healthCheckButton.setAttribute("aria-busy", "true");
+  healthStatus.hidden = false;
+  healthStatus.dataset.state = "";
+  healthStatus.textContent = "Checking providers\u2026";
+
+  try {
+    const response = await fetch("/api/health");
+    if (!response.ok) {
+      healthStatus.textContent = "Error: " + (await errorMessage(response));
+      healthStatus.dataset.state = "error";
+      return;
+    }
+    let health = null;
+    try {
+      health = await response.json();
+    } catch {
+      throw new Error("health response was not JSON.");
+    }
+    if (health === null || typeof health !== "object") {
+      throw new Error("health response was not a JSON object.");
+    }
+
+    const summary = healthLines(health)
+      .map((line) => line.label + ": " + line.text)
+      .join(" \u00b7 ");
+    healthStatus.textContent = summary;
+    healthStatus.dataset.state = healthState(health);
+  } catch (error) {
+    healthStatus.textContent = "Error: " + describeError(error);
+    healthStatus.dataset.state = "error";
+  } finally {
+    healthCheckButton.disabled = false;
+    healthCheckButton.removeAttribute("aria-busy");
+  }
 }
 
 document.getElementById("add-turn").addEventListener("click", addTurn);
@@ -487,6 +908,20 @@ jobList.addEventListener("click", (event) => {
   const jobId = card === null ? null : card.getAttribute("data-job-id");
   if (jobId) openJobDetail(jobId);
 });
+dialogBody.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  const control = event.target.closest("[data-action]");
+  if (control !== null) void handleDialogAction(control);
+});
+dialog.addEventListener("close", () => {
+  detailJobId = null;
+  stopDetailRefresh();
+});
+if (healthCheckButton instanceof HTMLButtonElement) {
+  healthCheckButton.addEventListener("click", () => {
+    void checkHealth();
+  });
+}
 document.getElementById("job-dialog-close").addEventListener("click", () => dialog.close());
 updateJudgePanel();
 renumberTurns();

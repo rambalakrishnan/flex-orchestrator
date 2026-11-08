@@ -697,24 +697,40 @@ input[type="file"]:hover::file-selector-button {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-/* Inline token-count status for one turn. */
+/* Inline token-count badge for one turn. Compact enough to sit inside a
+   turn card without turning into a full-width panel. */
 .turn-token-result {
   grid-column: 1 / -1;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
   min-height: 1.15em;
-  padding: 0.55rem 0.75rem;
+  padding: 0.2rem 0.62rem;
   margin: 0;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
-  line-height: 1.6;
+  line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: rgba(8, 10, 16, 0.5);
+  background: rgba(8, 10, 16, 0.45);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--inset-highlight);
+}
+
+.turn-token-result::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.4em;
+  height: 0.4em;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .turn-token-result:empty,
@@ -723,15 +739,23 @@ input[type="file"]:hover::file-selector-button {
 }
 
 .turn-token-result[data-state="ok"] {
-  color: color-mix(in srgb, var(--success) 78%, var(--text));
-  background: color-mix(in srgb, var(--success) 8%, rgba(8, 10, 16, 0.5));
-  border-left-color: var(--success);
+  color: color-mix(in srgb, var(--success) 82%, var(--text));
+  background: color-mix(in srgb, var(--success) 9%, rgba(8, 10, 16, 0.45));
+  border-color: color-mix(in srgb, var(--success) 32%, transparent);
+}
+
+.turn-token-result[data-state="ok"]::before {
+  background: var(--success);
 }
 
 .turn-token-result[data-state="error"] {
-  color: color-mix(in srgb, var(--danger) 82%, var(--text));
-  background: color-mix(in srgb, var(--danger) 10%, rgba(8, 10, 16, 0.5));
-  border-left-color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 84%, var(--text));
+  background: color-mix(in srgb, var(--danger) 10%, rgba(8, 10, 16, 0.45));
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+
+.turn-token-result[data-state="error"]::before {
+  background: var(--danger);
 }
 
 #add-turn {
@@ -1259,6 +1283,17 @@ em[class*="status-"] {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.job-detail-anchor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.45rem;
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
@@ -1987,7 +2022,376 @@ dialog,
 }
 
 /* --------------------------------------------------------------------------
-   11. Empty states, alerts, and utility primitives
+   11. Recovery, diagnostics, and health
+   -------------------------------------------------------------------------- */
+
+/* Durable job failure banner: error code badge plus a wrapping message. */
+.job-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.55rem;
+  min-width: 0;
+  padding: 0.55rem 0.8rem;
+  margin: 0;
+  color: color-mix(in srgb, var(--danger) 82%, var(--text));
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--danger) 10%, rgba(8, 10, 16, 0.45));
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+}
+
+.job-error:empty,
+.job-error[hidden] {
+  display: none;
+}
+
+.job-error :is(code, .job-error-code) {
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 0.08rem 0.42rem;
+  color: color-mix(in srgb, var(--danger) 94%, var(--text));
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius-xs);
+}
+
+.job-error :is(p, small, .job-error-message) {
+  flex: 1 1 14rem;
+  min-width: 0;
+  margin: 0;
+}
+
+/* Recovery action rows on job cards and inside the detail dialog. */
+.job-actions,
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.55rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.job-actions:empty,
+.dialog-actions:empty {
+  display: none;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Small ghost-action pills: resume, retry, and health probes. */
+.action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  flex: 0 0 auto;
+  padding: 0.28rem 0.72rem;
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-decoration: none;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-sm), var(--inset-highlight);
+  transition: transform var(--speed) var(--ease), opacity var(--speed) var(--ease);
+}
+
+.action-button:hover:not(:disabled) {
+  color: var(--accent-strong);
+  text-decoration: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateY(-1px);
+}
+
+.action-button:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+}
+
+.action-button[aria-busy="true"] {
+  opacity: 0.75;
+  cursor: progress;
+}
+
+/* Secondary export link; deliberately quieter than .download-final. */
+.download-jsonl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  flex: 0 0 auto;
+  padding: 0.28rem 0.75rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--inset-highlight);
+  transition: transform var(--speed) var(--ease), opacity var(--speed) var(--ease);
+}
+
+.download-jsonl:hover {
+  color: var(--accent-strong);
+  text-decoration: none;
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  transform: translateY(-1px);
+}
+
+.download-jsonl:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.download-jsonl[hidden] {
+  display: none;
+}
+
+.download-jsonl[aria-disabled="true"] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Health probe trigger in the masthead. */
+#health-check {
+  flex: 0 0 auto;
+  padding: 0.26rem 0.72rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--inset-highlight);
+}
+
+#health-check:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+#health-check[aria-busy="true"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+/* Keep the health affordances clustered at the trailing edge of the header
+   without disturbing any wrapper the view may introduce. */
+body > header > #health-check {
+  margin-left: auto;
+}
+
+/* Inline aggregate health readout: ok / warn / error. */
+#health-status {
+  --health-color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  min-width: 0;
+  max-width: min(100%, 40rem);
+  margin: 0;
+  padding: 0.2rem 0.68rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+#health-status::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: var(--health-color);
+  box-shadow: 0 0 8px var(--health-color);
+}
+
+#health-status:empty,
+#health-status[hidden] {
+  display: none;
+}
+
+#health-status:is([data-state="ok"], .health-ok, .ok) {
+  --health-color: var(--success);
+  color: color-mix(in srgb, var(--success) 82%, var(--text));
+  border-color: color-mix(in srgb, var(--success) 32%, transparent);
+}
+
+#health-status:is([data-state="warn"], .health-warn, .warn) {
+  --health-color: var(--warning);
+  color: color-mix(in srgb, var(--warning) 84%, var(--text));
+  border-color: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
+#health-status:is([data-state="error"], .health-error, .error) {
+  --health-color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 84%, var(--text));
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+
+/* Health probe panel rendered inside the job dialog. */
+.dialog-health {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  background: rgba(8, 10, 16, 0.42);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--inset-highlight);
+}
+
+.dialog-health:empty,
+.dialog-health[hidden] {
+  display: none;
+}
+
+.dialog-health :is(h3, h4, .dialog-health-title) {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.dialog-health :is(dl, ul, ol) {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dialog-health :is(dt, .health-label) {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dialog-health :is(dd, li, p) {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One probe row: label on the left, endpoint/model on the right. */
+.dialog-health :is(.health-probe, .health-probe-row) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.dialog-health :is(.health-probe, .health-probe-row):last-child {
+  border-bottom: 0;
+}
+
+.dialog-health code {
+  padding: 0.06rem 0.35rem;
+  color: var(--text);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+}
+
+.dialog-health .status {
+  padding: 0.12rem 0.5rem;
+  font-size: 0.68rem;
+}
+
+.dialog-health:is([data-state="ok"], .health-ok) {
+  border-left-color: var(--success);
+}
+
+.dialog-health:is([data-state="warn"], .health-warn) {
+  border-left-color: var(--warning);
+}
+
+.dialog-health:is([data-state="error"], .health-error) {
+  border-left-color: var(--danger);
+}
+
+/* Canonical response identifiers stay copyable and never widen a row. */
+.response-id {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.08rem 0.42rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  vertical-align: baseline;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  user-select: all;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+}
+
+.turn-response {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.45rem;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.turn-response :is(p, small, span) {
+  min-width: 0;
+  margin: 0;
+}
+
+.turn-response .response-id {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------------------
+   12. Empty states, alerts, and utility primitives
    -------------------------------------------------------------------------- */
 
 .empty-state {
@@ -2124,7 +2528,7 @@ dialog,
 }
 
 /* --------------------------------------------------------------------------
-   12. Responsive and preference media queries
+   13. Responsive and preference media queries
    -------------------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -2193,6 +2597,27 @@ dialog,
     width: 100%;
   }
 
+  .job-actions,
+  .dialog-actions {
+    gap: 0.4rem;
+  }
+
+  .dialog-actions {
+    justify-content: flex-start;
+  }
+
+  .dialog-actions > :is(.action-button, .download-jsonl) {
+    flex: 1 1 auto;
+  }
+
+  body > header > #health-check {
+    margin-left: 0;
+  }
+
+  #health-status {
+    max-width: 100%;
+  }
+
   .table-wrap {
     border-radius: var(--radius-sm);
   }
@@ -2241,7 +2666,11 @@ dialog,
   .btn:hover:not(:disabled),
   .btn:active:not(:disabled),
   .download-final:hover,
-  .download-final:active {
+  .download-final:active,
+  .action-button:hover:not(:disabled),
+  .action-button:active:not(:disabled),
+  .download-jsonl:hover,
+  .download-jsonl:active {
     transform: none;
   }
 
@@ -2293,7 +2722,13 @@ dialog,
   #judge-panel,
   #judge-details,
   .turn-block,
-  .table-wrap {
+  .table-wrap,
+  .job-error,
+  .dialog-health,
+  .action-button,
+  .download-jsonl,
+  #health-check,
+  #health-status {
     border-width: 2px;
   }
 

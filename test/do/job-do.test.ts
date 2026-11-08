@@ -33,6 +33,8 @@ interface JobDoTestStub {
   supersedeParent(epoch: number, childId: string): Promise<boolean>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
+  resumeJob(): Promise<JobStateResponse>;
+  retryTurn(turnIndex: number): Promise<JobStateResponse>;
   captureBranchSnapshot(
     forkTurnIndex: number
   ): Promise<
@@ -525,5 +527,85 @@ describe("JobDO judge steering configuration", () => {
     }
     expect(legacyJudgeConfig.injectOnFail).toBe(true);
     expect(legacyJudgeConfig.injectOnPass).toBe(false);
+  });
+});
+
+describe("JobDO operator recovery", () => {
+  it("seeds external continuity for the first initial attempt and records a warning", async () => {
+    const jobId = nextJobId();
+    const stub = stubFor(jobId);
+
+    const created = await stub.createJob({
+      jobId,
+      title: "external continuity",
+      config: JOB_CONFIG,
+      initialTurns: [],
+      initialPreviousResponseId: "resp_external_1",
+    });
+
+    expect(created.job.lastAcceptedResponseId).toBe("resp_external_1");
+    expect(created.job.acceptedTurnCount).toBe(0);
+    expect(created.job.warningMessages).toContain(
+      "external_previous_response_id:resp_external_1"
+    );
+    expect(created.job.errorCode).toBeNull();
+
+    const state = await stub.getState();
+    if (state === null) throw new Error("expected job state");
+    expect(state.job.lastAcceptedResponseId).toBe("resp_external_1");
+    expect(state.job.acceptedTurnCount).toBe(0);
+    expect(state.job.warningMessages).toContain(
+      "external_previous_response_id:resp_external_1"
+    );
+  });
+
+  it("rejects retryTurn for a non-current turn and resumeJob for a running job", async () => {
+    const jobId = nextJobId();
+    const stub = stubFor(jobId);
+    await stub.createJob({
+      jobId,
+      title: "recovery guards",
+      config: JOB_CONFIG,
+      initialTurns: [],
+    });
+
+    const rawStub = env.JOB_DO.get(env.JOB_DO.idFromName(jobId));
+    const retryMessage = await runInDurableObject(
+      rawStub,
+      async (instance): Promise<string> => {
+        // Invoke in-process so the rejected RPC never surfaces as an unhandled report.
+        const jobDo = instance as unknown as JobDoTestStub;
+        try {
+          await jobDo.retryTurn(2);
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }
+    );
+    expect(retryMessage).toContain("retryTurn requires the current turn index 1");
+
+    stubProviderFetch([]);
+    await stub.appendTurn({
+      promptText: "Start the first turn.",
+      attachmentFileIds: [],
+    });
+    const running = await stub.getState();
+    if (running === null) throw new Error("expected job state");
+    expect(running.job.status).toBe("running");
+
+    const resumeMessage = await runInDurableObject(
+      rawStub,
+      async (instance): Promise<string> => {
+        const jobDo = instance as unknown as JobDoTestStub;
+        try {
+          await jobDo.resumeJob();
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }
+    );
+    expect(resumeMessage).toContain("current status is running");
   });
 });

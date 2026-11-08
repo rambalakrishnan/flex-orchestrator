@@ -326,6 +326,16 @@ function uniqueStrings(values: readonly string[]): string[] {
   return result;
 }
 
+function normalizeInitialPreviousResponseId(
+  value: string | null | undefined
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return (
     value === "none" ||
@@ -750,6 +760,7 @@ function jobRowToRecord(row: JobRow, lineage: BranchLineageRow | null): JobRecor
     supersededByJobId: null,
     warningMessages: readStringArray(row.warnings_json),
     errorMessage: row.last_error_detail,
+    errorCode: row.last_error_code,
     createdAtMs: parseIsoMs(row.created_at),
     updatedAtMs: parseIsoMs(row.updated_at),
   };
@@ -892,6 +903,9 @@ export class JobDO extends DurableObject<Env> {
 
   async createJob(command: CreateJobCommand): Promise<JobStateResponse> {
     this.validateCreateJobCommand(command);
+    const initialPreviousResponseId = normalizeInitialPreviousResponseId(
+      command.initialPreviousResponseId
+    );
 
     const existing = getJob(this.sql);
     if (existing !== null) {
@@ -928,14 +942,17 @@ export class JobDO extends DurableObject<Env> {
           total_turns: Math.max(1, command.initialTurns.length),
           accepted_turn_index: 0,
           active_attempt_id: null,
-          last_accepted_response_id: null,
+          last_accepted_response_id: initialPreviousResponseId,
           last_judge_response_id: null,
           parent_job_id: null,
           fork_turn_index: null,
           revision: 1,
           last_error_code: null,
           last_error_detail: null,
-          warnings_json: "[]",
+          warnings_json:
+            initialPreviousResponseId === null
+              ? "[]"
+              : JSON.stringify([`external_previous_response_id:${initialPreviousResponseId}`]),
           usage_summary_json: "{}",
           created_at: nowIso,
           updated_at: nowIso,
@@ -1073,6 +1090,64 @@ export class JobDO extends DurableObject<Env> {
         break;
     }
     return this.requireState();
+  }
+
+  /** Resumes a failed job or a job paused by dispatch/storage faults. */
+  async resumeJob(): Promise<JobStateResponse> {
+    const job = requireJob(this.sql);
+    if (
+      job.status !== "failed" &&
+      job.status !== "paused_dispatch" &&
+      job.status !== "paused_storage"
+    ) {
+      throw new Error(
+        `resumeJob requires a failed, paused_dispatch, or paused_storage job; current status is ${job.status}`
+      );
+    }
+    await this.protectRecoveryFileRefs(job);
+    await this.performManualRetry(job);
+    return this.requireState();
+  }
+
+  /** Retries the current turn of a failed, paused, or paused-for-review job. */
+  async retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse> {
+    const requestedTurnIndex = assertTurnIndex(turnIndex, "retryTurn.turnIndex");
+    const job = requireJob(this.sql);
+    if (requestedTurnIndex !== job.current_turn_index) {
+      throw new Error(
+        `retryTurn requires the current turn index ${job.current_turn_index}; received ${requestedTurnIndex}`
+      );
+    }
+    if (
+      job.status !== "failed" &&
+      job.status !== "paused_review" &&
+      job.status !== "paused_dispatch" &&
+      job.status !== "paused_storage"
+    ) {
+      throw new Error(
+        `retryTurn requires a failed, paused_review, paused_dispatch, or paused_storage job; current status is ${job.status}`
+      );
+    }
+    await this.protectRecoveryFileRefs(job);
+    await this.performManualRetry(job);
+    return this.requireState();
+  }
+
+  /**
+   * Re-registers every file reference the recovered turn may re-send after a
+   * failed job released its references and opened the retention window.
+   */
+  private async protectRecoveryFileRefs(job: JobRow): Promise<void> {
+    const config = jobConfigFromRow(job);
+    const fileIds = uniqueStrings([
+      ...config.developerFileIds,
+      ...this.listAllTurnSummaries(null).flatMap((turn) =>
+        readStringArray(turn.attachment_file_ids_json),
+      ),
+    ]);
+    if (fileIds.length > 0) {
+      await this.registryStub().protectJobFileRefs(job.job_id, fileIds);
+    }
   }
 
   async captureBranchSnapshot(
@@ -1755,6 +1830,27 @@ export class JobDO extends DurableObject<Env> {
     }
     if (typeof command.title !== "string") {
       throw new Error("CreateJobCommand.title must be a string");
+    }
+    const initialPreviousResponseId = command.initialPreviousResponseId;
+    if (
+      initialPreviousResponseId !== undefined &&
+      initialPreviousResponseId !== null &&
+      typeof initialPreviousResponseId !== "string"
+    ) {
+      throw new Error(
+        "CreateJobCommand.initialPreviousResponseId must be a string, null, or undefined"
+      );
+    }
+    if (
+      typeof initialPreviousResponseId === "string" &&
+      initialPreviousResponseId.trim().length > 0
+    ) {
+      const trimmed = initialPreviousResponseId.trim();
+      if (trimmed.length > 512 || /[\u0000-\u0020\u007f]/.test(trimmed)) {
+        throw new Error(
+          "CreateJobCommand.initialPreviousResponseId must be at most 512 characters without whitespace or control characters"
+        );
+      }
     }
     const config = command.config;
     const profile = getVerifiedGenerationModel(config.model);
@@ -3985,9 +4081,10 @@ export class JobDO extends DurableObject<Env> {
     if (
       job.status !== "paused_review" &&
       job.status !== "paused_dispatch" &&
-      job.status !== "paused_storage"
+      job.status !== "paused_storage" &&
+      job.status !== "failed"
     ) {
-      throw new Error("manual_retry requires a paused job");
+      throw new Error("manual_retry requires a paused or failed job");
     }
     const turnIndex = job.current_turn_index;
     const turn = getTurnSummary(this.sql, turnIndex);

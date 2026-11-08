@@ -325,6 +325,8 @@ export interface JobRecord {
   readonly supersededByJobId: JobId | null;
   readonly warningMessages: readonly string[];
   readonly errorMessage: string | null;
+  /** Mirrors `jobs.last_error_code` in the warehouse job row. */
+  readonly errorCode: string | null;
   readonly createdAtMs: EpochMs;
   readonly updatedAtMs: EpochMs;
 }
@@ -707,6 +709,12 @@ export interface CreateJobCommand {
   readonly title: string;
   readonly config: JobConfig;
   readonly initialTurns: readonly TurnPromptSpec[];
+  /**
+   * Externally minted continuity anchor for the first initial attempt. Seeds
+   * `jobs.last_accepted_response_id` and is recorded in `warnings_json` as
+   * `external_previous_response_id:<id>`; an accepted turn 1 later replaces it.
+   */
+  readonly initialPreviousResponseId?: string | null;
 }
 
 export interface AppendTurnCommand {

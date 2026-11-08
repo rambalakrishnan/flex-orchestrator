@@ -46,7 +46,7 @@ export type BinaryPayload = ArrayBuffer | Uint8Array;
 // ============================================================================
 
 /** Explicit cache TTL selection per architecture & README. */
-export type CacheTtl = "30m" | "12h" | "24h" | "nocache";
+export type CacheTtl = "30m" | "12h" | "nocache";
 
 /** OpenAI Responses reasoning effort levels. */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";

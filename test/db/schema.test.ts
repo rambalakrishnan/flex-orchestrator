@@ -956,6 +956,25 @@ describe("schema DDL validation", () => {
         );
       }
 
+      expectRejectedInsert(
+        storage,
+        "jobs",
+        `INSERT INTO jobs (
+           job_id, status, model, reasoning_effort, max_output_tokens, cache_ttl,
+           judge_config_json, total_turns, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        "job_cache_24h",
+        "ready",
+        "gpt-5",
+        "high",
+        1024,
+        "24h",
+        "{}",
+        1,
+        NOW_ISO,
+        NOW_ISO
+      );
+
       const insertTurn = (turnIndex: number, status: string): void => {
         storage.sql.exec(
           `INSERT INTO turns (

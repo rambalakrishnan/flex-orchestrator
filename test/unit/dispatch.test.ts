@@ -157,7 +157,7 @@ describe("canonical generation request body (§7)", () => {
   });
 
   it("selects cache retention explicitly and omits it for nocache", () => {
-    for (const cacheTtl of ["30m", "12h", "24h"] as const) {
+    for (const cacheTtl of ["30m", "12h"] as const) {
       const { body } = requestBodyOf(cacheGenerationRequestParams(cacheTtl));
       expect(body.prompt_cache_retention).toBe(cacheTtl);
     }

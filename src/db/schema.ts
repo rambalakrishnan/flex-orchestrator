@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL,
   max_output_tokens INTEGER NOT NULL CHECK (max_output_tokens > 0),
-  cache_ttl TEXT NOT NULL CHECK (cache_ttl IN ('30m', '12h', '24h', 'nocache')),
+  cache_ttl TEXT NOT NULL CHECK (cache_ttl IN ('30m', '12h', 'nocache')),
   web_search INTEGER NOT NULL DEFAULT 0 CHECK (web_search IN (0, 1)),
   judge_config_json TEXT NOT NULL CHECK (json_valid(judge_config_json)),
   developer_prompt TEXT NOT NULL DEFAULT '',
@@ -748,7 +748,7 @@ export type JobStatus =
   | "cancelled"
   | "superseded";
 
-export type CacheTtlOption = "30m" | "12h" | "24h" | "nocache";
+export type CacheTtlOption = "30m" | "12h" | "nocache";
 
 export interface JobRow extends Record<string, SqlPrimitiveValue> {
   job_id: string;

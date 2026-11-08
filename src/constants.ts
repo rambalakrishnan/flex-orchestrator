@@ -233,7 +233,7 @@ export const GENERATION_SERVICE_TIER = "flex" as const;
 export const OPENAI_FILE_UPLOAD_PURPOSE = "user_data" as const;
 
 /** Explicit cache retention selections supported by job configuration. */
-export const CACHE_TTL_CHOICES = ["30m", "12h", "24h", "nocache"] as const;
+export const CACHE_TTL_CHOICES = ["30m", "12h", "nocache"] as const;
 export type CacheTtlChoice = (typeof CACHE_TTL_CHOICES)[number];
 
 /** Supported reasoning effort levels for generation models. */
@@ -359,7 +359,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 0.625,
       cachedInputUsdPerMillion: 0.0625,
@@ -384,7 +384,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 0.125,
       cachedInputUsdPerMillion: 0.0125,
@@ -405,7 +405,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: false,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 0.025,
       cachedInputUsdPerMillion: 0.0025,
@@ -426,7 +426,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 1.0,
       cachedInputUsdPerMillion: 0.25,
@@ -447,7 +447,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 0.55,
       cachedInputUsdPerMillion: 0.138,
@@ -468,7 +468,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 10.0,
       cachedInputUsdPerMillion: 1.0,
@@ -493,7 +493,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 2.0,
       cachedInputUsdPerMillion: 0.1,
@@ -518,7 +518,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 1.0,
       cachedInputUsdPerMillion: 0.05,
@@ -543,7 +543,7 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
     supportsFlexBackground: true,
     supportsWebSearch: true,
     supportsStatefulContinuity: true,
-    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    supportedCacheTtls: ["30m", "12h", "nocache"],
     standardPricing: {
       inputUsdPerMillion: 0.1,
       cachedInputUsdPerMillion: 0.01,

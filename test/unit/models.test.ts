@@ -28,7 +28,7 @@ const PRIOR_MODEL_IDS = [
   "o4-mini",
 ] as const;
 
-const EXPECTED_CACHE_TTLS = ["30m", "12h", "24h", "nocache"] as const;
+const EXPECTED_CACHE_TTLS = ["30m", "12h", "nocache"] as const;
 
 const NEW_MODEL_SHARED_LIMITS = {
   contextWindowTokens: 1_050_000,

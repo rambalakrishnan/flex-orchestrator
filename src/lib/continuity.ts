@@ -12,7 +12,7 @@
  *   and attaches `previous_response_id` only when a non-empty anchor is provided.
  * - Stateless continuity (`mode === "stateless"`) returns `{ store: false }`
  *   and never sends `previous_response_id`.
- * - Cache selection (`cachePayload`) is explicit across `"30m" | "12h" | "24h" | "nocache"`.
+ * - Cache selection (`cachePayload`) is explicit across `"30m" | "12h" | "nocache"`.
  */
 
 import { CACHE_TTL_CHOICES } from "../constants";
@@ -97,11 +97,11 @@ export function isCacheTtl(value: string): value is CacheTtl {
 }
 
 /**
- * Maps explicit cache selection (`"30m" | "12h" | "24h" | "nocache"`) to the
+ * Maps explicit cache selection (`"30m" | "12h" | "nocache"`) to the
  * canonical request payload fields (`...cachePayload(job.cache_ttl)` per §6).
  *
  * Returns `{}` when `"nocache"`, or `{ prompt_cache_retention: cacheTtl }`
- * for `"30m" | "12h" | "24h"`.
+ * for `"30m" | "12h"`.
  */
 export function cachePayload(
   cacheTtl: CacheTtl,

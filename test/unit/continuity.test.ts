@@ -176,7 +176,7 @@ describe("judgeHistoryToContinuityMode", () => {
 });
 
 describe("cachePayload", () => {
-  const cacheCases: readonly CacheTtl[] = ["30m", "12h", "24h", "nocache"];
+  const cacheCases: readonly CacheTtl[] = ["30m", "12h", "nocache"];
 
   it.each(cacheCases)("selects cache retention explicitly for %s", (cacheTtl) => {
     const payload = cachePayload(cacheTtl);

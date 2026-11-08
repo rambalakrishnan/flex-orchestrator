@@ -130,6 +130,7 @@ import type {
   BranchCreationOutcome,
   BranchSnapshot,
   BranchTurnSnapshot,
+  CacheTtl,
   CreateJobCommand,
   CursorPage,
   CursorPageRequest,
@@ -405,6 +406,17 @@ function parseJudgeConfig(raw: string): JudgeConfig {
   };
 }
 
+function normalizeCacheTtl(raw: string): CacheTtl {
+  if (raw === "30m" || raw === "12h" || raw === "nocache") {
+    return raw;
+  }
+  if (raw === "24h") {
+    // Legacy rows: the 24h retention choice is retired; read as 12h.
+    return "12h";
+  }
+  throw new Error(`Invalid jobs.cache_ttl: ${raw}`);
+}
+
 function jobConfigFromRow(row: JobRow): JobConfig {
   if (!isReasoningEffort(row.reasoning_effort)) {
     throw new Error(`Invalid jobs.reasoning_effort: ${row.reasoning_effort}`);
@@ -413,7 +425,7 @@ function jobConfigFromRow(row: JobRow): JobConfig {
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     maxOutputTokens: row.max_output_tokens,
-    cacheTtl: row.cache_ttl,
+    cacheTtl: normalizeCacheTtl(String(row.cache_ttl)),
     webSearch: row.web_search === 1,
     developerPrompt: row.developer_prompt,
     developerFileIds: uniqueStrings(
@@ -1756,7 +1768,6 @@ export class JobDO extends DurableObject<Env> {
     if (
       config.cacheTtl !== "30m" &&
       config.cacheTtl !== "12h" &&
-      config.cacheTtl !== "24h" &&
       config.cacheTtl !== "nocache"
     ) {
       throw new Error(`Unsupported cache TTL: ${String(config.cacheTtl)}`);

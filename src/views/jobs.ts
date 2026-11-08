@@ -3,11 +3,16 @@
  * fragments for the job list and job detail screens.
  *
  * Every fragment is intended for an `innerHTML` swap. Only accepted deliverable
- * text is inserted through `renderMarkdown`; every other dynamic value flows
- * through `escapeHtml`. Raw prompts, file ids, error details, and credentials
- * are never interpolated here.
+ * text is inserted through `renderMarkdown`; every other dynamic value,
+ * including raw turn prompts, flows through `escapeHtml`. File ids, error
+ * details, and credentials are never interpolated here.
  */
 
+import type {
+  GenerationAttemptSummaryRow,
+  JudgeCallSummaryRow,
+  TurnSummaryRow,
+} from "../db/schema.ts";
 import { escapeHtml, renderMarkdown } from "../lib/markdown.ts";
 import type { JobStateResponse, JobSummaryItem, TurnIndex, TurnStatus } from "../types.ts";
 
@@ -92,21 +97,207 @@ function renderDeliverable(deliverable: JobDeliverable): string {
   ].join("");
 }
 
+function renderOptionalText(value: string | number | null): string {
+  if (value === null || value === "") {
+    return `<span class="muted">—</span>`;
+  }
+  return escapeHtml(String(value));
+}
+
+function renderOptionalCode(value: string | null): string {
+  if (value === null || value === "") {
+    return `<span class="muted">—</span>`;
+  }
+  return `<code>${escapeHtml(value)}</code>`;
+}
+
+function renderFlag(value: number | null): string {
+  if (value === null) {
+    return `<span class="muted">—</span>`;
+  }
+  return value === 1 ? "Yes" : "No";
+}
+
+function renderTime(value: string): string {
+  return `<time datetime="${escapeHtml(value)}">${escapeHtml(value)}</time>`;
+}
+
+/**
+ * Renders one escaped table. Headings and every cell value are escaped at the
+ * point of insertion; callers may only pass already-safe markup such as status
+ * badges and `<time>` elements produced by the helpers above.
+ */
+function renderTable(
+  className: string,
+  headings: readonly string[],
+  rows: readonly string[],
+  emptyMessage: string,
+): string {
+  const head = headings
+    .map((heading) => `<th scope="col">${escapeHtml(heading)}</th>`)
+    .join("");
+  const body =
+    rows.length === 0
+      ? `<tr class="empty-row"><td colspan="${headings.length}">${escapeHtml(emptyMessage)}</td></tr>`
+      : rows.join("");
+
+  return [
+    `<div class="table-wrap">`,
+    `<table class="${escapeHtml(className)}">`,
+    `<thead><tr>${head}</tr></thead>`,
+    `<tbody>${body}</tbody>`,
+    `</table>`,
+    `</div>`,
+  ].join("");
+}
+
+function renderTableRow(cells: readonly string[]): string {
+  return `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+}
+
+function renderTurnsTable(
+  turns: readonly TurnSummaryRow[],
+  promptTextByTurnIndex: ReadonlyMap<number, string>,
+): string {
+  const rows = turns.map((turn) => {
+    const promptText = promptTextByTurnIndex.get(turn.turn_index);
+    const prompt =
+      promptText === undefined
+        ? escapeHtml(`${turn.prompt_bytes} bytes`)
+        : [
+            `<details class="prompt-details">`,
+            `<summary>Prompt</summary>`,
+            `<pre class="prompt-text">${escapeHtml(promptText)}</pre>`,
+            `</details>`,
+          ].join("");
+    const anchor =
+      turn.accepted_candidate_id === null && turn.accepted_response_id === null
+        ? `<span class="muted">—</span>`
+        : [
+            `<div class="accepted-candidate">${renderOptionalCode(turn.accepted_candidate_id)}</div>`,
+            `<div class="accepted-response">${renderOptionalCode(turn.accepted_response_id)}</div>`,
+          ].join("");
+
+    return renderTableRow([
+      escapeHtml(String(turn.turn_index)),
+      renderStatusBadge(turn.status),
+      prompt,
+      anchor,
+      renderOptionalText(turn.marginal_input_tokens),
+      renderTime(turn.updated_at),
+    ]);
+  });
+
+  return renderTable(
+    "turn-table",
+    ["Turn", "Status", "Prompt", "Accepted anchor", "Marginal tokens", "Updated"],
+    rows,
+    "No turns recorded yet.",
+  );
+}
+
+function renderAttemptsTable(
+  attempts: readonly GenerationAttemptSummaryRow[],
+): string {
+  const rows = attempts.map((attempt) =>
+    renderTableRow([
+      `<code>${escapeHtml(attempt.attempt_id)}</code>`,
+      escapeHtml(String(attempt.turn_index)),
+      escapeHtml(attempt.kind),
+      renderStatusBadge(attempt.status),
+      renderOptionalCode(attempt.provider_response_id),
+      escapeHtml(String(attempt.capacity_sends)),
+      escapeHtml(String(attempt.poll_probes)),
+      renderTime(attempt.created_at),
+      renderTime(attempt.updated_at),
+    ]),
+  );
+
+  return renderTable(
+    "attempt-table",
+    [
+      "Attempt",
+      "Turn",
+      "Kind",
+      "Status",
+      "Provider response",
+      "Capacity sends",
+      "Poll probes",
+      "Created",
+      "Updated",
+    ],
+    rows,
+    "No generation attempts recorded yet.",
+  );
+}
+
+function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): string {
+  const rows = judgeCalls.map((judgeCall) =>
+    renderTableRow([
+      escapeHtml(judgeCall.model),
+      escapeHtml(judgeCall.transport),
+      escapeHtml(judgeCall.history_mode),
+      escapeHtml(judgeCall.file_delivery_mode),
+      renderStatusBadge(judgeCall.status),
+      renderOptionalText(judgeCall.verdict),
+      renderOptionalText(judgeCall.grade),
+      judgeCall.comment === null
+        ? `<span class="muted">—</span>`
+        : `<span class="judge-comment">${escapeHtml(judgeCall.comment)}</span>`,
+      renderFlag(judgeCall.tag_agreement),
+      renderFlag(judgeCall.file_visibility),
+      renderTime(judgeCall.created_at),
+      renderTime(judgeCall.updated_at),
+    ]),
+  );
+
+  return renderTable(
+    "judge-table",
+    [
+      "Model",
+      "Transport",
+      "History",
+      "File delivery",
+      "Status",
+      "Verdict",
+      "Grade",
+      "Comment",
+      "Tag agreement",
+      "File visibility",
+      "Created",
+      "Updated",
+    ],
+    rows,
+    "No judge calls recorded yet.",
+  );
+}
+
 /**
  * Renders a job detail fragment. `deliverables` carries accepted turn text
  * because `JobStateResponse.turns` only exposes turn metadata. Deliverables
  * are ordered by `turnIndex`; model-authored text is the only unescaped
- * dynamic content and always passes through `renderMarkdown`.
+ * dynamic content and always passes through `renderMarkdown`. Turn prompts
+ * come from the job state (`TurnRecord.promptText`) because summary rows carry
+ * only prompt byte counts; every prompt, table cell, and identifier is
+ * escaped.
  */
 export function renderJobDetail(
   job: JobStateResponse,
   deliverables: readonly JobDeliverable[],
+  turns: readonly TurnSummaryRow[],
+  attempts: readonly GenerationAttemptSummaryRow[],
+  judgeCalls: readonly JudgeCallSummaryRow[],
 ): string {
   const sorted = [...deliverables].sort((a, b) => a.turnIndex - b.turnIndex);
   const body =
     sorted.length === 0
       ? `<p class="empty-state">No accepted deliverables yet.</p>`
       : sorted.map(renderDeliverable).join("");
+
+  const promptTextByTurnIndex = new Map<number, string>();
+  for (const turn of job.turns) {
+    promptTextByTurnIndex.set(turn.turnIndex, turn.promptText);
+  }
 
   return [
     `<article class="job-detail" data-job-id="${escapeHtml(job.job.jobId)}">`,
@@ -126,6 +317,18 @@ export function renderJobDetail(
     `<section class="deliverables">`,
     `<h2 class="deliverables-title">Deliverables</h2>`,
     body,
+    `</section>`,
+    `<section class="detail-section">`,
+    `<h3 class="detail-section-title">Turns</h3>`,
+    renderTurnsTable(turns, promptTextByTurnIndex),
+    `</section>`,
+    `<section class="detail-section">`,
+    `<h3 class="detail-section-title">Attempts</h3>`,
+    renderAttemptsTable(attempts),
+    `</section>`,
+    `<section class="detail-section">`,
+    `<h3 class="detail-section-title">Judge calls</h3>`,
+    renderJudgeCallsTable(judgeCalls),
     `</section>`,
     `</article>`,
   ].join("");

@@ -61,9 +61,9 @@ const JOBS_PATH = "/api/jobs";
 const JOBS_PATH_PREFIX = `${JOBS_PATH}/`;
 const JOBS_FRAGMENT_PATH = `${JOBS_PATH}/fragment`;
 
-/** Detail fragments read accepted turns in fixed-size internal pages. */
-const FRAGMENT_TURN_PAGE_LIMIT = 100;
-const FRAGMENT_MAX_TURN_PAGES = 4;
+/** Detail fragments read paginated rows in fixed-size internal pages. */
+const FRAGMENT_PAGE_LIMIT = 100;
+const FRAGMENT_MAX_PAGES = 4;
 
 const EXPORT_PAGE_LIMIT = LIST_PAGE_LIMIT_MAX;
 
@@ -457,32 +457,44 @@ async function getJobFragment(env: Env, jobId: JobId): Promise<Response> {
     if (state === null) {
       return notFound("Job not found");
     }
-    const deliverables = await collectAcceptedDeliverables(stub);
-    return htmlFragmentResponse(renderJobDetail(state, deliverables));
+    const { deliverables, turns } = await collectTurnFragment(stub);
+    const attempts = await collectFragmentRows((request) =>
+      stub.listAttempts(request),
+    );
+    const judgeCalls = await collectFragmentRows((request) =>
+      stub.listJudgeCalls(request),
+    );
+    return htmlFragmentResponse(
+      renderJobDetail(state, deliverables, turns, attempts, judgeCalls),
+    );
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
 }
 
 /**
- * Collects accepted turn deliverables for the detail fragment. Turn pages are
- * read with an internal primary-key cursor and a fixed page cap, so a job with
- * many historical turns cannot spin the request indefinitely.
+ * Collects the turn table rows and accepted turn deliverables for the detail
+ * fragment. Turn pages are read with an internal primary-key cursor and a
+ * fixed page cap, so a job with many historical turns cannot spin the request
+ * indefinitely.
  */
-async function collectAcceptedDeliverables(
-  stub: JobDoRpcStub,
-): Promise<JobDeliverable[]> {
+async function collectTurnFragment(stub: JobDoRpcStub): Promise<{
+  readonly deliverables: readonly JobDeliverable[];
+  readonly turns: readonly TurnSummaryRow[];
+}> {
   const deliverables: JobDeliverable[] = [];
+  const turns: TurnSummaryRow[] = [];
   let cursor: string | null = null;
 
-  for (let pageCount = 0; pageCount < FRAGMENT_MAX_TURN_PAGES; pageCount += 1) {
+  for (let pageCount = 0; pageCount < FRAGMENT_MAX_PAGES; pageCount += 1) {
     const request: CursorPageRequest =
       cursor === null
-        ? { limit: FRAGMENT_TURN_PAGE_LIMIT }
-        : { limit: FRAGMENT_TURN_PAGE_LIMIT, cursor };
+        ? { limit: FRAGMENT_PAGE_LIMIT }
+        : { limit: FRAGMENT_PAGE_LIMIT, cursor };
     const page = await stub.listTurns(request);
 
     for (const turn of page.items) {
+      turns.push(turn);
       if (
         turn.status !== "accepted" &&
         turn.status !== "accepted_with_warning"
@@ -513,7 +525,35 @@ async function collectAcceptedDeliverables(
     cursor = page.nextCursor;
   }
 
-  return deliverables;
+  return { deliverables, turns };
+}
+
+/**
+ * Reads every row of one paginated fragment list. The page cap bounds the RPC
+ * fan-out for jobs with very large histories.
+ */
+async function collectFragmentRows<T>(
+  fetchPage: (request: CursorPageRequest) => Promise<CursorPage<T>>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let cursor: string | null = null;
+
+  for (let pageCount = 0; pageCount < FRAGMENT_MAX_PAGES; pageCount += 1) {
+    const request: CursorPageRequest =
+      cursor === null
+        ? { limit: FRAGMENT_PAGE_LIMIT }
+        : { limit: FRAGMENT_PAGE_LIMIT, cursor };
+    const page = await fetchPage(request);
+    for (const item of page.items) {
+      rows.push(item);
+    }
+    if (!page.hasMore || page.nextCursor === null) {
+      break;
+    }
+    cursor = page.nextCursor;
+  }
+
+  return rows;
 }
 
 /** HTML fragments are never cached and never declare a JSON content type. */

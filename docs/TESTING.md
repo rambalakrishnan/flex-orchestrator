@@ -254,7 +254,7 @@ Cover: `src/lib/signature.ts`, `src/handlers/webhook.ts`, `src/do/router-do.ts`,
 Cover: `src/handlers/jobs.ts`, `src/do/job-do.ts`, `src/db/jobs.ts`.
 
 ### Accounting
-**22. Usage and pricing.** Usage is recorded once per call and includes discarded, partial, failed, and cancelled work when known. Missing usage and unknown pricing remain explicit rather than estimated. Pricing uses per-request rate cards and does not infer cache-write premiums from TTL. Cover: `src/lib/tokens.ts`, `src/db/attempts.ts`.
+**22. Usage and pricing.** Usage is recorded once per call and includes discarded, partial, failed, and cancelled work when known. A completed turn freezes the provider response's `usage.input_tokens` into `turns.marginal_input_tokens` at acceptance; branch initialization copies the frozen value and never recomputes it, and the detail fragment renders it. Missing usage and unknown pricing remain explicit rather than estimated. Pricing uses per-request rate cards and does not infer cache-write premiums from TTL. Cover: `src/lib/tokens.ts`, `src/db/attempts.ts`.
 
 ### Lists and pagination
 **23. List contract.** Lists use primary-key cursors, omit BLOBs, and clamp page limits to 1–100. Cover: `src/handlers/jobs.ts`, `src/handlers/files.ts`.
@@ -283,7 +283,7 @@ These checks exercise real Cloudflare and OpenAI infrastructure and cannot be fu
 No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] `public/index.html` loads and `/app.css` and `/app.js` return `200` from the application host.
 - [ ] Submitting the Create Job form uploads developer/turn files, posts a valid `CreateJobCommand` (developer context, dynamic turns, judge panel), and the job appears in `#job-list` after the next fragment poll.
-- [ ] Count Tokens uploads developer files and shows the projected input count and admission for the selected model.
+- [ ] Count Tokens uploads developer/turn files and shows one projected input-count line (plus admission) for the developer context and every turn; requests are issued in parallel.
 - [ ] The list refreshes every 12 seconds by replacing `#job-list` with the `/api/jobs/fragment` HTML.
 - [ ] Clicking a job card loads `/api/jobs/:id/fragment` into the dialog and rendered Markdown is visible.
 - [ ] A job title containing `<img onerror=...>` renders as text, and model output containing raw HTML renders escaped, not executable.

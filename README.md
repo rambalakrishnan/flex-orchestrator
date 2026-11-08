@@ -123,6 +123,10 @@ The Worker treats `HOOKS_HOST` as the public webhook ingress and every other rea
 5. Declare the judge’s transport, history mode, file-delivery mode, and model; or disable the judge.
 6. Start the job.
 
+Token counting:
+- **Count Tokens** previews the developer context and every turn in parallel, with projected input tokens and admission per line.
+- After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value.
+
 Generation uses Flex background Responses and never falls back to standard tier.
 
 ### Monitoring, recovery, branching, and exports

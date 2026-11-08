@@ -374,7 +374,7 @@ Helpers must intercept outbound `fetch` at the `ProviderIO` seam so canonical-re
 - Provider error text is bounded and redacted before persistence/export. Tests assert exact secret values, Bearer, `sk-`, JWT, query-key, and `x-api-key` forms disappear on dispatch/retrieval/model errors; provider error codes over 64 characters normalize to null.
 - `/api/health` rejects cross-site browser probes, path-unsafe `jobId` values, and does not disclose missing secret binding names. Lookalike `api.openai.com.*` hosts do not inherit OpenAI status.
 - Job fragments assert escaped error banners, Resume/Retry/JSONL controls, external initial-response anchors, and active response anchors.
-- Token-preview integration asserts the count request omits generation-only fields (`background`, `service_tier`, `max_output_tokens`, `prompt_cache_retention`) and projects the mocked provider input tokens.
+- Token-preview integration asserts the count request omits generation-only fields (`background`, `service_tier`, `max_output_tokens`, `prompt_cache_retention`, `prompt_cache_options`) and projects the mocked provider input tokens.
 - JSONL export tests parse every line from a failed job, require job/turn/attempt records, and assert provider diagnostics without request BLOBs or credentials.
 - Test files use `reset()` and `abortAllDurableObjects()` in `afterEach` and settle all scheduled alarms before finishing; no test relies on fresh Durable Object IDs as its primary isolation mechanism.
 - `waitUntil` promises are settled with `waitOnExecutionContext` or an equivalent explicit await; no test finishes with outstanding background work.

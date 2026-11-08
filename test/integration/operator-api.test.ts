@@ -268,6 +268,7 @@ describe("operator API diagnostics", () => {
       "service_tier",
       "max_output_tokens",
       "prompt_cache_retention",
+      "prompt_cache_options",
     ]) {
       expect(payload).not.toHaveProperty(strippedField);
     }

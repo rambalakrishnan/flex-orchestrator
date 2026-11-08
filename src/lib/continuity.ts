@@ -100,16 +100,21 @@ export function isCacheTtl(value: string): value is CacheTtl {
  * Maps explicit cache selection (`"30m" | "12h" | "nocache"`) to the
  * canonical request payload fields (`...cachePayload(job.cache_ttl)` per §6).
  *
- * Returns `{}` when `"nocache"`, or `{ prompt_cache_retention: cacheTtl }`
- * for `"30m" | "12h"`.
+ * Uses the current Responses `prompt_cache_options` object. `30m`/`12h`
+ * select the minimum cache lifetime; `nocache` selects explicit mode with no
+ * breakpoints, which disables prompt caching. The deprecated
+ * `prompt_cache_retention` field only accepts `in_memory`/`24h` and is never
+ * emitted.
  */
 export function cachePayload(
   cacheTtl: CacheTtl,
 ): Readonly<Record<string, unknown>> {
   if (cacheTtl === "nocache") {
-    return {};
+    return {
+      prompt_cache_options: { mode: "explicit" },
+    };
   }
   return {
-    prompt_cache_retention: cacheTtl,
+    prompt_cache_options: { ttl: cacheTtl },
   };
 }

@@ -38,6 +38,8 @@ Each attempt stores the exact UTF-8 request body that its sends use.
 
 Authorization headers are resolved at call time and are never included in the stored request.
 
+`cachePayload` emits the current Responses cache control: `prompt_cache_options.ttl` for `30m`/`12h`, and `prompt_cache_options.mode = "explicit"` with no breakpoints for `nocache`. The deprecated `prompt_cache_retention` field (`in_memory`/`24h`) is never emitted.
+
 ### §7 — Empty-output classification
 
 Structural acceptance requires non-empty retained deliverable text. Output that becomes empty after normalization and completion-marker removal is `empty_output`, including whitespace-only and marker-only output. An apparent valid completion tag does not make an empty candidate judgeable.

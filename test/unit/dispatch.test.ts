@@ -155,15 +155,16 @@ describe("canonical generation request body (§7)", () => {
     expect("include" in anchored).toBe(false);
   });
 
-  it("selects cache retention explicitly and omits it for nocache", () => {
+  it("selects prompt cache lifetime explicitly and disables it for nocache", () => {
     for (const cacheTtl of ["30m", "12h"] as const) {
       const { body } = requestBodyOf(cacheGenerationRequestParams(cacheTtl));
-      expect(body.prompt_cache_retention).toBe(cacheTtl);
+      expect(body.prompt_cache_options).toEqual({ ttl: cacheTtl });
+      expect("prompt_cache_retention" in body).toBe(false);
     }
 
     const { body } = requestBodyOf(cacheGenerationRequestParams("nocache"));
+    expect(body.prompt_cache_options).toEqual({ mode: "explicit" });
     expect("prompt_cache_retention" in body).toBe(false);
-    expect(Object.keys(body)).not.toContain("prompt_cache_retention");
   });
 
   it("consumes the shared continuity payload verbatim", () => {

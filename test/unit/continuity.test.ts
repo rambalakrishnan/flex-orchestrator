@@ -178,26 +178,22 @@ describe("judgeHistoryToContinuityMode", () => {
 describe("cachePayload", () => {
   const cacheCases: readonly CacheTtl[] = ["30m", "12h", "nocache"];
 
-  it.each(cacheCases)("selects cache retention explicitly for %s", (cacheTtl) => {
+  it.each(cacheCases)("emits current prompt cache options for %s", (cacheTtl) => {
     const payload = cachePayload(cacheTtl);
 
-    if (cacheTtl === "nocache") {
-      expect(payload).toEqual({});
-      expect(Object.keys(payload)).toEqual([]);
-      expect("prompt_cache_retention" in payload).toBe(false);
-      expect(JSON.stringify(payload)).toBe("{}");
-      return;
-    }
-
-    expect(payload).toEqual({ prompt_cache_retention: cacheTtl });
-    expect(Object.keys(payload)).toEqual(["prompt_cache_retention"]);
-    expect(JSON.stringify(payload)).toBe(
-      `{"prompt_cache_retention":"${cacheTtl}"}`,
+    expect(payload).toEqual(
+      cacheTtl === "nocache"
+        ? { prompt_cache_options: { mode: "explicit" } }
+        : { prompt_cache_options: { ttl: cacheTtl } },
     );
+    expect(Object.keys(payload)).toEqual(["prompt_cache_options"]);
+    expect("prompt_cache_retention" in payload).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain("prompt_cache_retention");
   });
 
-  it("never emits a fallback retention value for nocache", () => {
+  it("disables caching for nocache with explicit mode and no TTL", () => {
     const payload = cachePayload("nocache");
+    expect(payload).toEqual({ prompt_cache_options: { mode: "explicit" } });
     expect(JSON.stringify(payload)).not.toContain("30m");
     expect(JSON.stringify(payload)).not.toContain("12h");
     expect(JSON.stringify(payload)).not.toContain("24h");

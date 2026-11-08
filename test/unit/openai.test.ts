@@ -17,7 +17,7 @@ const CANONICAL_PAYLOAD: Readonly<Record<string, unknown>> = {
   store: true,
   reasoning: { effort: "high" },
   max_output_tokens: 128_000,
-  prompt_cache_retention: "12h",
+  prompt_cache_options: { ttl: "12h" },
   tools: [{ type: "web_search" }],
   input: [
     {
@@ -75,6 +75,7 @@ describe("countResponsesInputTokens", () => {
       "include",
       "max_output_tokens",
       "prompt_cache_retention",
+      "prompt_cache_options",
     ]) {
       expect(body).not.toHaveProperty(rejected);
     }

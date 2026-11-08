@@ -188,3 +188,51 @@ describe("worker hostname routing", () => {
     expect(unknownPath.status).toBe(404);
   });
 });
+
+describe("final markdown export", () => {
+  it("serves an empty final-markdown attachment for a ready job", async () => {
+    const jobId = `job_export_ready_${Date.now()}`;
+    expect((await postJob(jobId)).status).toBe(201);
+
+    const response = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/export/markdown`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+
+    const disposition = response.headers.get("content-disposition") ?? "";
+    expect(disposition.startsWith("attachment;")).toBe(true);
+    const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "";
+    expect(filename.endsWith("-final.md")).toBe(true);
+
+    expect(await response.text()).toBe("");
+  });
+
+  it("rejects non-GET methods on the final-markdown export path", async () => {
+    const jobId = `job_export_method_${Date.now()}`;
+    expect((await postJob(jobId)).status).toBe(201);
+
+    const response = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/export/markdown`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: APP_ORIGIN },
+        body: "{}",
+      },
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET");
+  });
+
+  it("omits the final-markdown download link from a ready job detail fragment", async () => {
+    const jobId = `job_export_link_${Date.now()}`;
+    expect((await postJob(jobId)).status).toBe(201);
+
+    const response = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/fragment`);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).not.toContain("Download Final Markdown");
+    expect(html).not.toContain(`/api/jobs/${jobId}/export/markdown`);
+  });
+});

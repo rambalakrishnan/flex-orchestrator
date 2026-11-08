@@ -112,7 +112,24 @@ export type JudgeConfig =
       readonly historyMode: JudgeHistoryMode;
       readonly fileDeliveryMode: JudgeFileDeliveryMode;
       readonly includePrior: boolean;
+      /**
+       * Minimum acceptable numeric grade (A=90, B=80, C=70, D=60, F=50). The
+       * field name is retained for compatibility; a numeric grade at or above
+       * this threshold passes the grade gate.
+       */
       readonly maxGradeThreshold: number;
+      /**
+       * Inject the judge's critique comment into the retry prompt when the
+       * verdict is FAIL. Defaults to `true` for persisted configurations that
+       * predate this flag.
+       */
+      readonly injectOnFail: boolean;
+      /**
+       * Inject the judge's critique comment into the continuation prompt when
+       * the verdict is PASS. Defaults to `false` for persisted configurations
+       * that predate this flag.
+       */
+      readonly injectOnPass: boolean;
       /**
        * Developer context delivered to the judge as a developer-role message.
        * Judge developer files are attached to that same developer message on every judge call.

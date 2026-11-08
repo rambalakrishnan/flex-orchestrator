@@ -112,6 +112,17 @@ function judgeOutputJson(overrides: Readonly<Record<string, unknown>> = {}): str
   });
 }
 
+function newJudgeOutputJson(overrides: Readonly<Record<string, unknown>> = {}): string {
+  return JSON.stringify({
+    verdict: "YES",
+    grade: "B",
+    comment: "Acceptable deliverable.",
+    tag_matches_expected_step: true,
+    file_visibility: true,
+    ...overrides,
+  });
+}
+
 const VALID_JUDGE_OUTPUT_JSON = judgeOutputJson();
 
 const TEST_USAGE: TokenUsageRecord = {
@@ -395,7 +406,7 @@ describe("judge output shape (item 14)", () => {
       "verdict",
       "grade",
       "comment",
-      "tag_agreement",
+      "tag_matches_expected_step",
       "file_visibility",
     ]);
     expect(JUDGE_MAX_GRADE).toBe(100);
@@ -442,7 +453,7 @@ describe("judge output shape (item 14)", () => {
     expect(parseFail(judgeOutputJson({ comment: "   " }))).toBe(
       "invalid_response_shape",
     );
-    expect(parseFail(judgeOutputJson({ verdict: "pass" }))).toBe(
+    expect(parseFail(newJudgeOutputJson({ tag_matches_expected_step: "true" }))).toBe(
       "invalid_response_shape",
     );
   });
@@ -451,8 +462,79 @@ describe("judge output shape (item 14)", () => {
     expect(parseFail(judgeOutputJson({ grade: 101 }))).toBe("invalid_response_shape");
     expect(parseFail(judgeOutputJson({ grade: -1 }))).toBe("invalid_response_shape");
     expect(parseFail(judgeOutputJson({ grade: 1.5 }))).toBe("invalid_response_shape");
+    expect(parseFail(judgeOutputJson({ grade: "G" }))).toBe("invalid_response_shape");
     expect(parseOk(judgeOutputJson({ grade: 0 })).grade).toBe(0);
     expect(parseOk(judgeOutputJson({ grade: 100 })).grade).toBe(100);
+  });
+
+  it("normalizes the new YES/NO verdict and letter-grade wire shape", () => {
+    const output = parseOk(newJudgeOutputJson());
+
+    expect(output).toEqual({
+      verdict: "PASS",
+      grade: 85,
+      comment: "Acceptable deliverable.",
+      tag_agreement: true,
+      file_visibility: true,
+    });
+
+    expect(parseOk(newJudgeOutputJson({ verdict: "NO" })).verdict).toBe("FAIL");
+
+    const letterGrades = [
+      ["A", 95],
+      ["B", 85],
+      ["C", 75],
+      ["D", 65],
+      ["F", 50],
+    ] as const;
+    for (const [letter, numeric] of letterGrades) {
+      const candidate = parseOk(newJudgeOutputJson({ grade: letter }));
+      expect(candidate.grade).toBe(numeric);
+    }
+  });
+
+  it("accepts lowercase verdicts and letter grades", () => {
+    expect(parseOk(judgeOutputJson({ verdict: "pass" })).verdict).toBe("PASS");
+    expect(parseOk(judgeOutputJson({ verdict: "fail" })).verdict).toBe("FAIL");
+
+    const lower = parseOk(
+      newJudgeOutputJson({ verdict: "no", grade: "a" }),
+    );
+    expect(lower.verdict).toBe("FAIL");
+    expect(lower.grade).toBe(95);
+    expect(parseOk(newJudgeOutputJson({ grade: "c" })).grade).toBe(75);
+  });
+
+  it("rejects mixed legacy and current tag keys", () => {
+    // Both tag keys present: six fields, so the exact five-field contract fails.
+    expect(
+      parseFail(newJudgeOutputJson({ tag_agreement: true })),
+    ).toBe("invalid_response_shape");
+
+    // Both tag keys plus a missing required field: still rejected.
+    expect(
+      parseFail(
+        JSON.stringify({
+          verdict: "YES",
+          grade: "A",
+          tag_matches_expected_step: true,
+          tag_agreement: true,
+          file_visibility: true,
+        }),
+      ),
+    ).toBe("invalid_response_shape");
+
+    // Neither tag key: primary-key set mismatch is rejected.
+    expect(
+      parseFail(
+        JSON.stringify({
+          verdict: "YES",
+          grade: "A",
+          comment: "ok",
+          file_visibility: true,
+        }),
+      ),
+    ).toBe("invalid_response_shape");
   });
 
   it("rejects invalid JSON and empty output, purely", () => {
@@ -541,7 +623,6 @@ describe("developer prompt composition", () => {
   const generatedInstruction = buildJudgeInstruction({
     turnIndex: BASE_BUILD_PARAMS.turnIndex,
     expectedTagIndex: BASE_BUILD_PARAMS.turnIndex,
-    maxGrade: JUDGE_MAX_GRADE,
   });
   const composedInstruction = `${developerPrompt}\n\n${generatedInstruction}`;
 
@@ -585,6 +666,43 @@ describe("developer prompt composition", () => {
     for (const fieldName of JUDGE_OUTPUT_FIELD_NAMES) {
       expect(developerText).toContain(fieldName);
     }
+  });
+});
+
+describe("judge instruction text", () => {
+  it("requests the five-field YES/NO letter-grade shape with no numeric grade cap", () => {
+    const instruction = buildJudgeInstruction({ turnIndex: 4, expectedTagIndex: 4 });
+
+    expect(instruction).toBe(
+      'Evaluate the candidate deliverable for the declared turn. Expected turn index: 4. Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.',
+    );
+    for (const fieldName of JUDGE_OUTPUT_FIELD_NAMES) {
+      expect(instruction).toContain(`"${fieldName}"`);
+    }
+    expect(instruction).not.toContain("tag_agreement");
+    expect(instruction).not.toContain("maxGrade");
+    expect(instruction).not.toContain("0-100");
+    expect(instruction).not.toContain(String(JUDGE_MAX_GRADE));
+    expect(instruction).not.toContain("PASS");
+    expect(instruction).not.toContain("FAIL");
+  });
+
+  it("embeds the generated instruction verbatim in the built request", () => {
+    const built = expectBuilt(build(openAiJudge(), { turnIndex: 4 }));
+
+    const request = JSON.parse(built.requestBody) as {
+      readonly input: readonly {
+        readonly role?: string;
+        readonly content?: readonly { readonly type?: string; readonly text?: string }[];
+      }[];
+    };
+    const developerMessage = request.input.find(
+      (item) => item.role === "developer",
+    );
+    expect(developerMessage).toBeDefined();
+    expect(developerMessage?.content?.[0]?.text).toBe(
+      buildJudgeInstruction({ turnIndex: 4, expectedTagIndex: 4 }),
+    );
   });
 });
 

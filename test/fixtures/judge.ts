@@ -43,6 +43,8 @@ export function enabledJudgeConfig(
     fileDeliveryMode: "passthrough",
     includePrior: false,
     maxGradeThreshold: 100,
+    injectOnFail: true,
+    injectOnPass: false,
     developerPrompt: "",
     ...overrides,
   };

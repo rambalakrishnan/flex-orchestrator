@@ -32,6 +32,7 @@ import type {
   JudgeFileManifestEntry,
   JudgeHistoryMode,
   JudgeTransport,
+  JudgeVerdict,
   ResponseId,
   TokenUsageRecord,
   TurnIndex,
@@ -39,17 +40,29 @@ import type {
 } from "../types.ts";
 import { judgeHistoryToContinuityMode, reasoningContinuityPayload } from "./continuity.ts";
 
-/** Exact five accepted judge output fields. */
+/** Exact five accepted judge output fields in the current wire shape. */
 export const JUDGE_OUTPUT_FIELD_NAMES = [
   "verdict",
   "grade",
   "comment",
-  "tag_agreement",
+  "tag_matches_expected_step",
   "file_visibility",
 ] as const;
 
+/** Legacy tag-agreement key accepted from previously prompted judge models. */
+export const JUDGE_LEGACY_TAG_FIELD_NAME = "tag_agreement";
+
 /** Marker emitted by Chat Completions providers that support JSON mode. */
 export const JUDGE_MAX_GRADE = 100;
+
+/** Letter grades normalized to the numeric 0-100 scale. */
+const JUDGE_LETTER_GRADES: Readonly<Record<string, number>> = {
+  A: 95,
+  B: 85,
+  C: 75,
+  D: 65,
+  F: 50,
+};
 
 export type EnabledJudgeConfig = Extract<JudgeConfig, { readonly enabled: true }>;
 
@@ -166,15 +179,8 @@ export function encodeBase64(bytes: Uint8Array): string {
 export function buildJudgeInstruction(params: {
   readonly turnIndex: TurnIndex;
   readonly expectedTagIndex: TurnIndex;
-  readonly maxGrade: number;
 }): string {
-  return [
-    "Evaluate the candidate deliverable for the declared turn.",
-    `Expected turn index: ${params.expectedTagIndex}.`,
-    "Reply with a single JSON object containing exactly these five fields:",
-    `"verdict" ("PASS" or "FAIL"), "grade" (integer 0-${params.maxGrade}), "comment" (non-empty string), "tag_agreement" (boolean), "file_visibility" (boolean).`,
-    "Do not include any other fields, prose, or markdown fences.",
-  ].join(" ");
+  return `Evaluate the candidate deliverable for the declared turn. Expected turn index: ${params.expectedTagIndex}. Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.`;
 }
 
 function buildManifest(params: {
@@ -325,7 +331,6 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
   const generatedInstruction = buildJudgeInstruction({
     turnIndex: params.turnIndex,
     expectedTagIndex: params.turnIndex,
-    maxGrade: Math.min(JUDGE_MAX_GRADE, Math.max(0, Math.trunc(config.maxGradeThreshold))),
   });
   const trimmedDeveloperPrompt = config.developerPrompt.trim();
   const instruction =
@@ -466,10 +471,48 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Accepts PASS/FAIL or YES/NO case-insensitively and normalizes to PASS/FAIL. */
+function normalizeVerdict(value: unknown): JudgeVerdict | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  switch (value.toUpperCase()) {
+    case "PASS":
+    case "YES":
+      return "PASS";
+    case "FAIL":
+    case "NO":
+      return "FAIL";
+    default:
+      return null;
+  }
+}
+
 /**
- * Validates the exact five-field judge output. Extra fields, wrong types,
- * missing fields, out-of-range grades, and empty comments are rejected before
- * any database write.
+ * Accepts an integer 0-100 or a letter A-F case-insensitively and normalizes
+ * to the numeric 0-100 scale (A=95, B=85, C=75, D=65, F=50).
+ */
+function normalizeGrade(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 0 || value > JUDGE_MAX_GRADE) {
+      return null;
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    const mapped = JUDGE_LETTER_GRADES[value.toUpperCase()];
+    return mapped === undefined ? null : mapped;
+  }
+  return null;
+}
+
+/**
+ * Validates the exact five-field judge output. The tag-agreement field accepts
+ * the current `tag_matches_expected_step` key or the legacy `tag_agreement`
+ * key. Verdicts normalize from YES/NO or PASS/FAIL, letter grades normalize to
+ * the numeric 0-100 scale, and extra fields, wrong types, missing fields,
+ * out-of-range grades, and empty comments are rejected before any database
+ * write.
  */
 export function parseJudgeOutput(rawText: string): JudgeOutputParseResult {
   const trimmed = rawText.trim();
@@ -493,30 +536,46 @@ export function parseJudgeOutput(rawText: string): JudgeOutputParseResult {
   }
 
   const keys = Object.keys(parsed).sort();
-  const expectedKeys = [...JUDGE_OUTPUT_FIELD_NAMES].sort();
-  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+  const allowedKeys: ReadonlySet<string> = new Set<string>([
+    ...JUDGE_OUTPUT_FIELD_NAMES,
+    JUDGE_LEGACY_TAG_FIELD_NAME,
+  ]);
+  const hasCurrentTagKey = Object.prototype.hasOwnProperty.call(
+    parsed,
+    "tag_matches_expected_step",
+  );
+  const hasLegacyTagKey = Object.prototype.hasOwnProperty.call(
+    parsed,
+    JUDGE_LEGACY_TAG_FIELD_NAME,
+  );
+
+  if (
+    keys.length !== JUDGE_OUTPUT_FIELD_NAMES.length ||
+    !keys.every((key) => allowedKeys.has(key)) ||
+    hasCurrentTagKey === hasLegacyTagKey
+  ) {
     return {
       ok: false,
       reason: "invalid_response_shape",
-      message: `Judge output must contain exactly ${JUDGE_OUTPUT_FIELD_NAMES.join(", ")}; received ${keys.join(", ") || "(none)"}`,
+      message: `Judge output must contain exactly five fields: verdict, grade, comment, tag_matches_expected_step (or legacy tag_agreement), file_visibility; received ${keys.join(", ") || "(none)"}`,
     };
   }
 
-  const verdict = parsed.verdict;
-  if (verdict !== "PASS" && verdict !== "FAIL") {
+  const verdict = normalizeVerdict(parsed.verdict);
+  if (verdict === null) {
     return {
       ok: false,
       reason: "invalid_response_shape",
-      message: 'verdict must be "PASS" or "FAIL"',
+      message: 'verdict must be "PASS"/"FAIL" or "YES"/"NO"',
     };
   }
 
-  const grade = parsed.grade;
-  if (typeof grade !== "number" || !Number.isInteger(grade) || grade < 0 || grade > JUDGE_MAX_GRADE) {
+  const grade = normalizeGrade(parsed.grade);
+  if (grade === null) {
     return {
       ok: false,
       reason: "invalid_response_shape",
-      message: `grade must be an integer between 0 and ${JUDGE_MAX_GRADE}`,
+      message: `grade must be an integer between 0 and ${JUDGE_MAX_GRADE}, or one of the letters A, B, C, D, F`,
     };
   }
 
@@ -529,12 +588,17 @@ export function parseJudgeOutput(rawText: string): JudgeOutputParseResult {
     };
   }
 
-  const tagAgreement = parsed.tag_agreement;
+  const tagAgreement = Object.prototype.hasOwnProperty.call(
+    parsed,
+    "tag_matches_expected_step",
+  )
+    ? parsed.tag_matches_expected_step
+    : parsed[JUDGE_LEGACY_TAG_FIELD_NAME];
   if (typeof tagAgreement !== "boolean") {
     return {
       ok: false,
       reason: "invalid_response_shape",
-      message: "tag_agreement must be a boolean",
+      message: "tag_matches_expected_step (or legacy tag_agreement) must be a boolean",
     };
   }
 

@@ -609,6 +609,42 @@ export interface CountResponsesInputTokensParams {
 }
 
 /**
+ * Fields accepted by `POST /responses/input_tokens`.
+ *
+ * The token-count endpoint deliberately rejects generation-only fields
+ * (`background`, `service_tier`, `max_output_tokens`, cache/continuity fields);
+ * forwarding a canonical generation body verbatim produces a provider 400.
+ */
+const INPUT_TOKEN_COUNT_FIELDS = [
+  "conversation",
+  "input",
+  "instructions",
+  "model",
+  "parallel_tool_calls",
+  "personality",
+  "previous_response_id",
+  "reasoning",
+  "text",
+  "tool_choice",
+  "tools",
+  "truncation",
+] as const;
+
+/** Projects a canonical request payload onto the token-count API's accepted fields. */
+function toInputTokenCountPayload(
+  payload: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const projected: Record<string, unknown> = {};
+  for (const field of INPUT_TOKEN_COUNT_FIELDS) {
+    const value = payload[field];
+    if (value !== undefined) {
+      projected[field] = value;
+    }
+  }
+  return projected;
+}
+
+/**
  * Calls `POST /responses/input_tokens` to obtain the provider token count for a request payload.
  */
 export async function countResponsesInputTokens(
@@ -616,7 +652,8 @@ export async function countResponsesInputTokens(
 ): Promise<{ readonly inputTokens: number }> {
   const apiRoot = normalizeApiRoot(params.apiRoot);
   const url = `${apiRoot}/responses/input_tokens`;
-  const encodedBody = utf8Encoder.encode(JSON.stringify(params.payload));
+  const body = toInputTokenCountPayload(params.payload);
+  const encodedBody = utf8Encoder.encode(JSON.stringify(body));
 
   const response = await performRequest(
     url,

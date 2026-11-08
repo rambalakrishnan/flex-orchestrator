@@ -455,7 +455,321 @@ button[type="submit"]:hover:not(:disabled),
 }
 
 /* --------------------------------------------------------------------------
-   5. Status pills
+   5. Create-job form sections
+   -------------------------------------------------------------------------- */
+
+#create-job-form > fieldset {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  padding: var(--card-pad);
+  background: rgba(255, 255, 255, 0.018);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+#create-job-form > fieldset > legend {
+  grid-column: 1 / -1;
+  padding: 0 0.55rem;
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+#create-job-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--gap);
+  align-items: start;
+}
+
+#create-job-form fieldset > p {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  margin: 0;
+}
+
+#create-job-form fieldset > p:has(textarea),
+#create-job-form fieldset > p:has(input[type="file"]),
+#create-job-form fieldset > p:has(button),
+#create-job-form fieldset > p:has(input[type="radio"]),
+#create-job-form fieldset > p#token-preview,
+#create-job-form fieldset > #turns,
+#create-job-form fieldset > #judge-panel {
+  grid-column: 1 / -1;
+}
+
+#create-job-form fieldset > p:has(input[type="checkbox"]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+#create-job-form fieldset > p:has(input[type="checkbox"]) label {
+  order: 1;
+  cursor: pointer;
+}
+
+/* Model datalist input */
+#job-model {
+  padding-right: 2rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
+}
+
+/* Textarea sizing per section */
+#developer-prompt {
+  min-height: 5.75rem;
+}
+
+#judge-prompt {
+  min-height: 5rem;
+}
+
+.turn-prompt {
+  min-height: 6.5rem;
+}
+
+#create-job-form textarea {
+  resize: vertical;
+}
+
+/* File inputs */
+#create-job-form input[type="file"] {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  background: rgba(8, 10, 16, 0.45);
+  border-style: dashed;
+  border-color: var(--border-strong);
+  cursor: pointer;
+}
+
+#create-job-form input[type="file"]:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+}
+
+input[type="file"]::file-selector-button {
+  margin-right: 0.7rem;
+  padding: 0.3rem 0.75rem;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 650;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+input[type="file"]:hover::file-selector-button {
+  background: rgba(255, 255, 255, 0.11);
+}
+
+/* Count Tokens + preview */
+#count-tokens {
+  justify-self: start;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+#token-preview {
+  grid-column: 1 / -1;
+  min-height: 1.15em;
+  padding: 0.6rem 0.8rem;
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  background: rgba(8, 10, 16, 0.5);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+#token-preview:empty {
+  display: none;
+}
+
+/* Turns builder */
+#turns {
+  display: grid;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.turn-block {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 0.75rem var(--gap);
+  min-width: 0;
+  padding: var(--card-pad);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012)),
+    rgba(20, 24, 35, 0.4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm), var(--inset-highlight);
+}
+
+.turn-block > p {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.turn-block > p:has(textarea),
+.turn-block > p:has(input[type="file"]),
+.turn-block > p:has(button) {
+  grid-column: 1 / -1;
+}
+
+.turn-block-header {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.turn-block-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.turn-remove {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 11%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+
+#add-turn {
+  grid-column: 1 / -1;
+  justify-self: start;
+  color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.03);
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+
+/* Judge panel */
+#create-job-form fieldset > p:has(#judge-enabled) {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+#judge-enabled {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+#judge-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--gap);
+  min-width: 0;
+  padding: var(--card-pad);
+  background: rgba(8, 10, 16, 0.3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+#judge-panel[hidden] {
+  display: none;
+}
+
+#judge-panel[aria-disabled="true"] {
+  opacity: 0.45;
+}
+
+#judge-panel :disabled {
+  cursor: not-allowed;
+}
+
+#judge-panel > p {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  margin: 0;
+}
+
+#judge-panel > p:has(textarea),
+#judge-panel > p:has(input[type="radio"]) {
+  grid-column: 1 / -1;
+}
+
+#judge-grade {
+  max-width: 10rem;
+}
+
+/* Radio groups */
+#judge-panel > p:has(input[type="radio"]),
+#create-job-form fieldset > p:has(input[type="radio"]),
+.radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  padding: 0.55rem 0.7rem;
+  background: rgba(8, 10, 16, 0.35);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.group-label {
+  flex-basis: 100%;
+  color: var(--faint);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+label:has(> input[type="radio"]) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.7rem;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+label:has(> input[type="radio"]:checked) {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+label:has(> input[type="radio"]):focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   6. Status pills
    -------------------------------------------------------------------------- */
 
 .status {
@@ -565,7 +879,7 @@ em[class*="status-"] {
 }
 
 /* --------------------------------------------------------------------------
-   6. Job list, cards, and detail
+   7. Job list, cards, and detail
    -------------------------------------------------------------------------- */
 
 #job-list {
@@ -763,7 +1077,7 @@ em[class*="status-"] {
 }
 
 /* --------------------------------------------------------------------------
-   7. Deliverables — typographic markdown output
+   8. Deliverables — typographic markdown output
    -------------------------------------------------------------------------- */
 
 .deliverable {
@@ -957,7 +1271,221 @@ em[class*="status-"] {
 }
 
 /* --------------------------------------------------------------------------
-   8. Dialog
+   9. Job detail tables
+   -------------------------------------------------------------------------- */
+
+.detail-section {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.detail-section-title {
+  margin: 0.8rem 0 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.job-detail > * {
+  min-width: 0;
+}
+
+.table-wrap {
+  min-width: 0;
+  max-height: min(72vh, 48rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(8, 10, 16, 0.3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+/* Fallback for unwrapped tables: scroll the containing detail block. */
+.job-detail > *:has(> :is(.turn-table, .attempt-table, .judge-table)) {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.job-detail:has(> :is(.turn-table, .attempt-table, .judge-table)) {
+  overflow-x: auto;
+}
+
+.turn-table,
+.attempt-table,
+.judge-table {
+  width: 100%;
+  min-width: 38rem;
+  font-size: var(--text-sm);
+  text-align: left;
+  border-collapse: collapse;
+}
+
+.attempt-table {
+  min-width: 52rem;
+}
+
+.judge-table {
+  min-width: 58rem;
+}
+
+.turn-table thead th,
+.attempt-table thead th,
+.judge-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0.55rem 0.7rem;
+  color: var(--faint);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  background: var(--surface-solid);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.turn-table td,
+.attempt-table td,
+.judge-table td {
+  padding: 0.5rem 0.7rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.turn-table tbody tr:last-child td,
+.attempt-table tbody tr:last-child td,
+.judge-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.turn-table tbody tr:nth-child(even),
+.attempt-table tbody tr:nth-child(even),
+.judge-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.turn-table tbody tr:hover,
+.attempt-table tbody tr:hover,
+.judge-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+/* Compact monospace identifiers. */
+:is(.turn-table, .attempt-table, .judge-table) code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+:is(.turn-table, .attempt-table, .judge-table) .accepted-candidate,
+:is(.turn-table, .attempt-table, .judge-table) .accepted-response {
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+:is(.turn-table, .attempt-table, .judge-table) time {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.judge-comment {
+  display: block;
+  max-width: 22rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* Status pills sit denser inside table rows. */
+:is(.turn-table, .attempt-table, .judge-table) .status {
+  padding: 0.12rem 0.5rem;
+  font-size: 0.68rem;
+}
+
+/* Prompt disclosure inside turn rows. */
+.prompt-details,
+.job-detail details {
+  min-width: 0;
+  max-width: 42rem;
+  padding: 0.35rem 0.6rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.prompt-details > summary,
+.job-detail details > summary {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+}
+
+.prompt-details[open] > summary,
+.job-detail details[open] > summary {
+  margin-bottom: 0.45rem;
+  color: var(--text);
+}
+
+.prompt-text,
+.prompt-details pre,
+.job-detail details pre {
+  max-height: 14rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Empty-state rows. */
+.turn-table tbody tr.empty-row,
+.attempt-table tbody tr.empty-row,
+.judge-table tbody tr.empty-row {
+  background: none;
+}
+
+.turn-table tbody tr.empty-row:hover,
+.attempt-table tbody tr.empty-row:hover,
+.judge-table tbody tr.empty-row:hover {
+  background: none;
+}
+
+.turn-table .empty-row td,
+.attempt-table .empty-row td,
+.judge-table .empty-row td {
+  padding: 1.1rem 0.7rem;
+  color: var(--faint);
+  font-size: var(--text-sm);
+  font-style: italic;
+  text-align: center;
+  background: none;
+}
+
+/* --------------------------------------------------------------------------
+   10. Dialog
    -------------------------------------------------------------------------- */
 
 dialog,
@@ -1075,7 +1603,7 @@ dialog,
 }
 
 /* --------------------------------------------------------------------------
-   9. Empty states, alerts, and utility primitives
+   11. Empty states, alerts, and utility primitives
    -------------------------------------------------------------------------- */
 
 .empty-state {
@@ -1212,7 +1740,7 @@ dialog,
 }
 
 /* --------------------------------------------------------------------------
-   10. Responsive and preference media queries
+   12. Responsive and preference media queries
    -------------------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -1240,6 +1768,35 @@ dialog,
   .job-list,
   .job-grid {
     grid-template-columns: 1fr;
+  }
+
+  #create-job-form fieldset,
+  #judge-panel,
+  .turn-block {
+    grid-template-columns: 1fr;
+  }
+
+  #create-job-form > fieldset {
+    padding: 1rem;
+  }
+
+  .turn-block-header {
+    align-items: flex-start;
+  }
+
+  #judge-grade {
+    max-width: 100%;
+  }
+
+  .table-wrap {
+    border-radius: var(--radius-sm);
+  }
+
+  .turn-table,
+  .attempt-table,
+  .judge-table {
+    min-width: 32rem;
+    font-size: var(--text-xs);
   }
 
   #job-dialog {
@@ -1303,6 +1860,13 @@ dialog,
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
+
+  #create-job-form > fieldset,
+  #judge-panel,
+  .turn-block,
+  .table-wrap {
+    background: var(--surface-strong);
+  }
 }
 
 @media (prefers-contrast: more) {
@@ -1315,7 +1879,17 @@ dialog,
   .job-card,
   body > section,
   .job-detail,
-  .deliverable {
+  .deliverable,
+  #create-job-form > fieldset,
+  #judge-panel,
+  .turn-block,
+  .table-wrap {
     border-width: 2px;
+  }
+
+  .turn-table thead th,
+  .attempt-table thead th,
+  .judge-table thead th {
+    color: var(--muted);
   }
 }

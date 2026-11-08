@@ -33,6 +33,8 @@ JUDGE_DEFAULT_MODEL = "muse-spark-1.3-contributor"
 [secrets]
 required = [
   "HOOKS_HOST",
-  "OPENAI_WEBHOOK_SECRET"
+  "OPENAI_WEBHOOK_SECRET",
   "OPENAI_API_KEY"
+# Configure your judge model API keys in the Cloudflare Dashboard as well
 ]
+

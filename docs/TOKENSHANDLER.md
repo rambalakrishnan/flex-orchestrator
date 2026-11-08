@@ -50,7 +50,9 @@ Implementations MUST NOT invent interfaces: use `MarginalTokenPreviewRequest` / 
 
 **Sanitize failures.** Provider errors return a stable sanitized error through `toErrorResponse`; invalid input returns `400`/`422`. Never forward raw provider bodies or stack traces.
 
-### Platform traps
+**Unknown job is 404.** When `jobId` is supplied, `JobDO.getState()` may return `null`; return `404 not_found` and never issue a provider count for a missing job.
+
+## Platform traps
 
 - An incoming `Request` body is read once; take `request.clone()` before parsing if both raw bytes and decoded JSON are needed, because a consumed body cannot be read again.
 - Outbound `fetch()` request bodies are limited to 100 MiB each and only 6 outbound connections may be open simultaneously per request.

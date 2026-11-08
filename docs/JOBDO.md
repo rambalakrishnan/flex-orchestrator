@@ -18,11 +18,12 @@ JobDO RPC (binding RPC; all methods async). Do not add another public method or 
 
 ```ts
 - createJob(command: CreateJobCommand): Promise<JobStateResponse>
-- getState(): Promise<JobStateResponse>
+- getState(): Promise<JobStateResponse | null>
 - appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>
 - applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>
 - captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshot | { kind: "rejected"; reason: "parent_not_quiescent" | "snapshot_too_large" | "invalid_fork_turn"; message: string }>
 - initializeBranch(snapshot: BranchSnapshot): Promise<BranchCreationOutcome>
+- supersedeParent(epoch: number, childId: string): Promise<boolean>
 - receiveWebhookDelivery(event: VerifiedWebhookEvent): Promise<void>
 - listTurns(request: CursorPageRequest): Promise<CursorPage<TurnSummaryRow>>
 - listAttempts(request: CursorPageRequest & { turnIndex?: TurnIndex }): Promise<CursorPage<GenerationAttemptSummaryRow>>
@@ -49,7 +50,7 @@ JobDO RPC (binding RPC; all methods async). Do not add another public method or 
 
 **Judge outcomes.** Build requests with `buildJudgeRequest`, validate with `parseJudgeOutput`, and classify with `classifyJudgeEvaluation` from `src/lib/judge.ts`. Apply README §Recovery actions: accept an otherwise valid candidate with a warning on judge infrastructure failure; pause a structurally valid candidate for review on a valid rejection, excessive grade, or judge-only tag disagreement; accept with a coverage warning when file visibility is incomplete on an otherwise passing result. "Accept-with-warning uses the ordinary acceptance transition and preserves the original judge result." Operator acceptance never bypasses structural validity, admission, refusal handling, or artifact guards. Judge feedback never enters generation input automatically (TESTING §17).
 
-**Branching.** README §Monitoring: "Branch initialization consumes a complete snapshot in one local transaction. Branch activation follows file protection and conditional superseding of the quiescent parent. Branch snapshots are bounded to 8,000,000 encoded bytes." `captureBranchSnapshot` reads the parent's turns, candidates, attempts, and judge calls inside one local read transaction and rejects a non-quiescent parent; validate the encoded size with `assertBranchSnapshotSize`. `initializeBranch` consumes the supplied `BranchSnapshot` in one local transaction, refuses activation when `snapshot_bytes` exceeds the guard, and supersedes only a parent that is still quiescent; abort without partial claims when the parent's revision advanced.
+**Branching.** README §Monitoring: "Branch initialization consumes a complete snapshot in one local transaction. Branch activation follows file protection and conditional superseding of the quiescent parent. Branch snapshots are bounded to 8,000,000 encoded bytes." `captureBranchSnapshot` reads the parent's turns, candidates, attempts, and judge calls inside one local read transaction and rejects a non-quiescent parent; validate the encoded size with `assertBranchSnapshotSize`. `initializeBranch` consumes the supplied `BranchSnapshot` in one local transaction, refuses activation when `snapshot_bytes` exceeds the guard, then calls the parent's `supersedeParent(snapshot.parentJob.revision, branchJobId)`. `parentSuperseded` in the outcome reflects that returned boolean; a false result leaves the child branch created but the parent active. `getState()` returns `null` when this job has no row. `supersedeParent` enforces the epoch fence (parent revision must equal `epoch`), requires a quiescent parent (no in-flight attempt, no pending durable work), is idempotent once superseded, records `superseded_by:<childId>` in the parent's warnings, and publishes the superseded index status.
 
 **Exports.** README §Monitoring: "Exports remain available in every job state and stream pages and one artifact at a time." Implement `listTurns` / `listAttempts` / `listJudgeCalls` over the `*_SUMMARY_COLUMNS` projections with primary-key cursors clamped to 1–100, and `readArtifact` for a single BLOB per call. Never materialize the whole job or hold a cursor across a network wait (ARCHITECTURE §12).
 

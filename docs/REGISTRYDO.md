@@ -17,7 +17,7 @@ RegistryDO RPC (binding RPC; all methods async). Do not add another public metho
 
 ```ts
 - registerJob(summary: JobSummaryItem): Promise<void>
-- updateJobIndexStatus(jobId: JobId, status: JobStatus, revision: number): Promise<void>
+- updateJobIndexStatus(jobId: JobId, status: JobStatus, revision: number, currentTurnIndex: number, acceptedTurnCount: number): Promise<void>
 - findFileByHash(sha256: string): Promise<FileCatalogueRecord | null>
 - beginUploadIntent(input: { intentId: string; sha256: string; filename: string; mimeType: string; byteSize: number; expiresAtMs: number }): Promise<FileUploadIntentRecord>
 - completeUploadIntent(intentId: string, fileId: FileId): Promise<void>
@@ -34,7 +34,7 @@ RegistryDO RPC (binding RPC; all methods async). Do not add another public metho
 
 ### Invariants
 
-**Single global index.** Register each job once with `registerJob(summary)`; update only `status`, terminality, and `revision` through `updateJobIndexStatus`. Derive `is_terminal` from `JobStatus` (`completed`, `failed`, `cancelled`, `superseded` are terminal); a stale `revision` never overwrites a newer index row. Never store job state beyond `JobSummaryItem`.
+**Single global index.** Register each job once with `registerJob(summary)`, which stores `current_turn_index`, `accepted_turn_count`, status, and revision; update status, terminality, revision, and both counters through `updateJobIndexStatus`. `listJobs` projects the stored counters into `JobSummaryItem`. Derive `is_terminal` from `JobStatus` (`completed`, `failed`, `cancelled`, `superseded` are terminal); a stale `revision` never overwrites a newer index row. Never store job state beyond `JobSummaryItem`.
 
 **Content-hash dedupe.** README §Files and Limits: "Live content hashes deduplicate source uploads." `findFileByHash` returns only a live (`status = "live"`) catalogue record; hashes are the lowercase SHA-256 hex computed over the exact uploaded bytes by `src/handlers/files.ts`. Never dedupe by filename, size, or a client-supplied hash.
 

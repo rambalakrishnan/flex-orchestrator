@@ -49,7 +49,7 @@ Implementations MUST NOT invent interfaces: build responses from `src/types.ts`,
 
 **Validate identifiers and query parameters before RPC.** Require a non-empty `jobId`; decode the path segment exactly once and never treat it as a filesystem path. Accept `format` only as `markdown` or `json`; parse `limit` with `clampPageLimit` and `turnIndex` as a positive integer; reject unknown query values with a sanitized `400`. Do not pass unvalidated strings into allowlists or SQL-shaped parameters.
 
-**Pass state responses through unchanged.** Return `JobStateResponse` exactly as `JobDO` produced it, including `pollIntervalMs` (the browser polls every 12 seconds while work is active, README §Monitoring). Never substitute a client-supplied poll interval, recompute usage, or filter turns inside the handler.
+**Missing jobs are 404.** `JobDO.getState()` returns `null` for an unknown job; `GET /api/jobs/:jobId` and both exports return `404 not_found` without creating state. **Pass state responses through unchanged.** Return `JobStateResponse` exactly as `JobDO` produced it, including `pollIntervalMs` (the browser polls every 12 seconds while work is active, README §Monitoring). Never substitute a client-supplied poll interval, recompute usage, or filter turns inside the handler.
 
 **Export format is explicit.** `format` is mandatory (`markdown` or `json`); do not guess a default. A markdown export never includes rejected or unaccepted turns, and a JSON export always reports the high-water marks even when the job has no attempts or judge calls (`null` keys).
 
@@ -73,7 +73,7 @@ Source: https://developers.cloudflare.com/durable-objects/best-practices/automat
 - `env.JOB_DO`: `createJob`, `getState`, `appendTurn`, `applyOperatorDecision`, `captureBranchSnapshot`, `initializeBranch`, `listTurns`, `listAttempts`, `listJudgeCalls`, `captureExportHighWaterMarks`, `readArtifact`.
 - `env.REGISTRY_DO`: `registerJob`, `updateJobIndexStatus`, `listJobs`, `protectJobFileRefs`, `releaseJobFileRefs`.
 - `src/http.ts` bounded readers and response helpers; `src/types.ts` wire types; `src/db/schema.ts` summary row types.
-- Contract gap: `GET /api/jobs` requires paged reads of `job_index`, but the shared contract exposes no job-index listing RPC on `RegistryDO`. Do not invent one; escalate for a contract amendment before implementing that route.
+- `GET /api/jobs` reads the index through the amended `REGISTRY_DO.listJobs`.
 
 ### Anti-patterns
 

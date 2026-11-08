@@ -67,6 +67,13 @@ const FRAGMENT_MAX_PAGES = 4;
 
 const EXPORT_PAGE_LIMIT = LIST_PAGE_LIMIT_MAX;
 
+/**
+ * Residual completion markers are stripped from final-markdown downloads.
+ * Accepted deliverables are normally stored already marker-free, but imported
+ * or branch-copied candidates may still carry one.
+ */
+const TURN_END_MARKER_PATTERN = /<!--\s*TURN_END:\s*\d+\s*-->/g;
+
 /** Artifact kinds readable through `JobDO.readArtifact`. */
 type ReadArtifactKind =
   | "turn_prompt"
@@ -175,6 +182,17 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
     }
     rejectUnknownQuery(url, []);
     return getJobState(env, jobId);
+  }
+  if (
+    subpath.length === 2 &&
+    subpath[0] === "export" &&
+    subpath[1] === "markdown"
+  ) {
+    if (method !== "GET") {
+      return methodNotAllowed(["GET"]);
+    }
+    rejectUnknownQuery(url, []);
+    return exportFinalMarkdown(env, jobId);
   }
   if (subpath.length !== 1) {
     return notFound();
@@ -675,6 +693,109 @@ async function exportMarkdown(env: Env, jobId: JobId): Promise<Response> {
     "text/markdown; charset=utf-8",
     { filename: exportFilename(jobId, "md") },
   );
+}
+
+/**
+ * Streams the concatenation of accepted turn deliverables for the final
+ * Markdown download. The response intentionally contains no job metadata or
+ * turn headings: only accepted deliverable text separated by exactly one
+ * blank line.
+ */
+async function exportFinalMarkdown(
+  env: Env,
+  jobId: JobId,
+): Promise<Response> {
+  const stub = getJobStub(env, jobId);
+  let state: JobStateResponse;
+  try {
+    const loaded = await stub.getState();
+    if (loaded === null) {
+      return notFound("Job not found");
+    }
+    state = loaded;
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+
+  const boundary = deriveAcceptedBoundary(state);
+  return streamResponse(
+    streamTextChunks(finalMarkdownChunks(stub, boundary)),
+    "text/markdown; charset=utf-8",
+    { filename: `${safeFilenameBase(jobId)}-final.md` },
+  );
+}
+
+/**
+ * Yields accepted deliverables in turn order separated by exactly `\n\n`.
+ * The accepted-prefix boundary is captured before streaming starts, so a
+ * later acceptance can never enter this download.
+ */
+async function* finalMarkdownChunks(
+  stub: JobDoRpcStub,
+  boundary: number,
+): AsyncGenerator<string, void, void> {
+  if (boundary <= 0) {
+    return;
+  }
+
+  let cursor: string | null = null;
+  let first = true;
+  let finished = false;
+
+  while (!finished) {
+    const page = await stub.listTurns({
+      limit: EXPORT_PAGE_LIMIT,
+      ...(cursor === null ? {} : { cursor }),
+      maxTurnIndex: boundary,
+    });
+
+    for (const turn of page.items) {
+      if (
+        !Number.isSafeInteger(turn.turn_index) ||
+        turn.turn_index > boundary
+      ) {
+        finished = true;
+        break;
+      }
+      if (
+        turn.status !== "accepted" &&
+        turn.status !== "accepted_with_warning"
+      ) {
+        continue;
+      }
+
+      const candidateId = turn.accepted_candidate_id;
+      if (typeof candidateId !== "string" || candidateId.length === 0) {
+        continue;
+      }
+      const artifact = await stub.readArtifact({
+        kind: "candidate_deliverable",
+        id: candidateId,
+      });
+      if (artifact === null) {
+        continue;
+      }
+
+      const piece = decodeArtifactText(artifact.bytes).replace(
+        TURN_END_MARKER_PATTERN,
+        "",
+      );
+      if (!first) {
+        yield "\n\n";
+      }
+      first = false;
+      yield piece;
+    }
+
+    if (finished) {
+      break;
+    }
+    const nextCursor = page.nextCursor;
+    if (!page.hasMore || nextCursor === null || nextCursor === cursor) {
+      break;
+    }
+    cursor = nextCursor;
+  }
 }
 
 async function exportJson(env: Env, jobId: JobId): Promise<Response> {
@@ -1762,11 +1883,14 @@ function toJson(value: unknown): string {
 }
 
 function exportFilename(jobId: string, extension: string): string {
+  return `${safeFilenameBase(jobId)}.${extension}`;
+}
+
+function safeFilenameBase(jobId: string): string {
   const safe = jobId
     .replace(/[^A-Za-z0-9._-]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  const base = safe.length > 0 ? safe.slice(0, 96) : "job";
-  return `${base}.${extension}`;
+  return safe.length > 0 ? safe.slice(0, 96) : "job";
 }
 
 function escapeMarkdownText(value: string): string {

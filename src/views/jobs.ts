@@ -23,7 +23,7 @@ export interface JobDeliverable {
 }
 
 function renderStatusBadge(status: string): string {
-  return `<span class="status status-${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+  return `<span class="status status-${escapeHtml(status.toLowerCase())}">${escapeHtml(status)}</span>`;
 }
 
 function renderCount(label: string, value: number): string {
@@ -85,14 +85,49 @@ function renderUsageSummary(job: JobStateResponse): string {
   ].join("");
 }
 
-function renderDeliverable(deliverable: JobDeliverable): string {
+function renderDeliverable(
+  deliverable: JobDeliverable,
+  marginalInputTokens: number | null,
+  judgeCalls: readonly JudgeCallSummaryRow[],
+): string {
+  const marginal =
+    marginalInputTokens === null
+      ? ""
+      : `<span class="deliverable-tokens">Marginal input tokens: ${escapeHtml(String(marginalInputTokens))}</span>`;
+
   return [
     `<section class="deliverable" data-turn-index="${escapeHtml(String(deliverable.turnIndex))}">`,
     `<header class="deliverable-header">`,
     `<h3 class="deliverable-turn">Turn ${escapeHtml(String(deliverable.turnIndex))}</h3>`,
     renderStatusBadge(deliverable.status),
+    marginal,
     `</header>`,
     `<div class="deliverable-content">${renderMarkdown(deliverable.text)}</div>`,
+    judgeCalls.map(renderTurnJudgeResult).join(""),
+    `</section>`,
+  ].join("");
+}
+
+/**
+ * Renders the judge result(s) observed for one accepted turn inside its
+ * deliverable card. Verdict and grade are escaped when inserted; a judge
+ * comment is model-authored and therefore escaped as plain text.
+ */
+function renderTurnJudgeResult(judgeCall: JudgeCallSummaryRow): string {
+  const verdict =
+    judgeCall.verdict === null
+      ? `<span class="muted">—</span>`
+      : renderStatusBadge(judgeCall.verdict);
+  const comment =
+    judgeCall.comment === null || judgeCall.comment === ""
+      ? `<span class="muted">—</span>`
+      : escapeHtml(judgeCall.comment);
+
+  return [
+    `<section class="turn-judge" data-judge-call-id="${escapeHtml(judgeCall.judge_call_id)}">`,
+    verdict,
+    `<span class="turn-judge-grade">Grade: ${renderOptionalText(judgeCall.grade)}</span>`,
+    `<p class="turn-judge-comment">${comment}</p>`,
     `</section>`,
   ].join("");
 }
@@ -275,11 +310,13 @@ function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): stri
 /**
  * Renders a job detail fragment. `deliverables` carries accepted turn text
  * because `JobStateResponse.turns` only exposes turn metadata. Deliverables
- * are ordered by `turnIndex`; model-authored text is the only unescaped
- * dynamic content and always passes through `renderMarkdown`. Turn prompts
- * come from the job state (`TurnRecord.promptText`) because summary rows carry
- * only prompt byte counts; every prompt, table cell, and identifier is
- * escaped.
+ * are ordered by `turnIndex`; model-authored deliverable text is the only
+ * unescaped dynamic content and always passes through `renderMarkdown`. Each
+ * deliverable card also carries the judge result(s) recorded for its turn and
+ * the frozen marginal input token count when one is stored. Turn prompts come
+ * from the job state (`TurnRecord.promptText`) because summary rows carry only
+ * prompt byte counts; every prompt, table cell, judge comment, and identifier
+ * is escaped. A completed job links to its final-markdown download.
  */
 export function renderJobDetail(
   job: JobStateResponse,
@@ -288,16 +325,43 @@ export function renderJobDetail(
   attempts: readonly GenerationAttemptSummaryRow[],
   judgeCalls: readonly JudgeCallSummaryRow[],
 ): string {
+  const promptTextByTurnIndex = new Map<number, string>();
+  const marginalTokensByTurnIndex = new Map<number, number>();
+  for (const turn of job.turns) {
+    promptTextByTurnIndex.set(turn.turnIndex, turn.promptText);
+    if (turn.marginalInputTokens !== null) {
+      marginalTokensByTurnIndex.set(turn.turnIndex, turn.marginalInputTokens);
+    }
+  }
+
+  const judgeCallsByTurnIndex = new Map<number, JudgeCallSummaryRow[]>();
+  for (const judgeCall of judgeCalls) {
+    const existing = judgeCallsByTurnIndex.get(judgeCall.turn_index);
+    if (existing === undefined) {
+      judgeCallsByTurnIndex.set(judgeCall.turn_index, [judgeCall]);
+    } else {
+      existing.push(judgeCall);
+    }
+  }
+
   const sorted = [...deliverables].sort((a, b) => a.turnIndex - b.turnIndex);
   const body =
     sorted.length === 0
       ? `<p class="empty-state">No accepted deliverables yet.</p>`
-      : sorted.map(renderDeliverable).join("");
+      : sorted
+          .map((deliverable) =>
+            renderDeliverable(
+              deliverable,
+              marginalTokensByTurnIndex.get(deliverable.turnIndex) ?? null,
+              judgeCallsByTurnIndex.get(deliverable.turnIndex) ?? [],
+            ),
+          )
+          .join("");
 
-  const promptTextByTurnIndex = new Map<number, string>();
-  for (const turn of job.turns) {
-    promptTextByTurnIndex.set(turn.turnIndex, turn.promptText);
-  }
+  const downloadFinal =
+    job.job.status === "completed"
+      ? `<a class="button download-final" href="/api/jobs/${escapeHtml(encodeURIComponent(job.job.jobId))}/export/markdown" download>Download Final Markdown</a>`
+      : "";
 
   return [
     `<article class="job-detail" data-job-id="${escapeHtml(job.job.jobId)}">`,
@@ -313,6 +377,7 @@ export function renderJobDetail(
     renderCount("Accepted turns", job.job.acceptedTurnCount),
     `</dl>`,
     renderUsageSummary(job),
+    downloadFinal,
     `</header>`,
     `<section class="deliverables">`,
     `<h2 class="deliverables-title">Deliverables</h2>`,

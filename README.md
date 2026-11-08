@@ -119,6 +119,7 @@ The Worker treats `HOOKS_HOST` as the public webhook ingress and every other rea
 2. Select a verified generation model. Unknown models receive no guessed limits or fallback profile.
 3. Set generation controls: reasoning effort, maximum output tokens, cache selection, and optional web search.
    - Cache selection is explicit among `30m`, `12h`, and `nocache`. The retired `24h` retention option is not accepted; legacy persisted rows are read as `12h`.
+   - Optionally supply an **External previous_response_id**. It seeds turn 1's continuity anchor, is recorded as the warning `external_previous_response_id:<id>`, and is replaced by the first accepted turn.
 4. Upload attachments. Client-submitted generation attachments use Files API uploads and returned `file_id` references.
 5. Configure the judge: Base URL (OpenAI/OpenRouter datalist), model, API-key env var name, transport, history mode, file-delivery mode, minimum acceptable grade, and the two steering toggles; or disable the judge.
    - **Inject Critique on Failure** (default on): a judge failure retries the turn with `### JUDGE CRITIQUE` appended to the prompt.
@@ -127,21 +128,27 @@ The Worker treats `HOOKS_HOST` as the public webhook ingress and every other rea
 
 Token counting:
 - Each turn card has its own **Count Tokens** button; the preview includes that turn plus the developer context and reports projected input tokens and admission inline.
-- After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value.
+- A failed count reports the sanitized provider status and error code when available, rather than only a generic 502.
+- **Health Check** probes the provider status summary and model list for the main provider; inside a job's detail it also probes the configured judge provider and checks both configured model IDs.
+- After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value. Provider response IDs are shown for each accepted turn and its latest attempt.
 
 Generation uses Flex background Responses and never falls back to standard tier.
 
 ### Monitoring, recovery, branching, and exports
 
-- Browser state polling runs every 12 seconds while work is active.
-- Failed and cancelled jobs recover through export or branching rather than in-place resumption.
+- Browser state polling runs every 12 seconds while work is active. An open job dialog refreshes its fragment on the same cadence.
+- Failed and paused jobs expose **Resume Job** when the status is `failed`, `paused_dispatch`, or `paused_storage`. **Retry Turn** is available on the current turn for those states and `paused_review`; it starts a manual retry without changing automatic recovery counters.
+- Failure banners show the persisted error code and message. The attempts table shows sanitized provider error details parsed from attempt diagnostics.
 - Branch initialization consumes a complete snapshot in one local transaction. Branch activation follows file protection and conditional superseding of the quiescent parent. Branch snapshots are bounded to 8,000,000 encoded bytes.
 - Exports remain available in every job state and stream pages and one artifact at a time.
   - **Markdown:** accepted deliverables only, with the included turn range and status.
   - **Final Markdown:** `GET /api/jobs/:id/export/markdown` concatenates accepted deliverables with turn markers stripped; completed jobs show a **Download Final Markdown** button.
   - **JSON:** retained definitions, attempts, judge calls, usage, provenance, diagnostics, file IDs, and missing-artifact markers.
+  - **JSONL:** `GET /api/jobs/:id/export/jsonl` streams job, turn, attempt, and judge-call summaries as `application/x-ndjson` ordered by primary key. It omits request BLOBs, credentials, and encoded file bytes; it is available for incomplete jobs. If a page read fails after streaming starts, the final line is `{"type":"export_incomplete",...}` rather than a silently truncated file.
   - JSON exports include encoded file bytes only when those bytes occur in a retained inline judge request. Exports do not fetch source files or attach a separate copy of their contents. Credentials are never exported.
   - A live JSON export is a versioned observation, not an atomic database backup.
+
+The application health endpoint is `GET /api/health` and optionally `GET /api/health?jobId=<id>`. It reports latency, OpenAI status indicator, model-list availability, and whether the job's configured main/judge model IDs are present. Provider credentials and raw error bodies are never returned.
 
 ## Provider Configurations
 

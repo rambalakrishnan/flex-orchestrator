@@ -44,10 +44,14 @@ test/
 │   ├── dispatch.test.ts
 │   ├── judge.test.ts
 │   ├── tokens.test.ts
+│   ├── health.test.ts
+│   ├── redaction.test.ts
 │   ├── guards.test.ts        # pure guard functions, no real bytes
 │   └── alarm.test.ts
 ├── integration/
 │   ├── http.test.ts
+│   ├── routing.test.ts
+│   ├── operator-api.test.ts
 │   ├── handlers-jobs.test.ts
 │   ├── handlers-files.test.ts
 │   ├── handlers-tokens.test.ts
@@ -328,6 +332,16 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] A branch whose parent resumes during snapshot initialization aborts safely and cleans up its files.
 - [ ] Copied history shows inherited provenance, not new branch spend.
 
+### Operator recovery and diagnostics
+- [ ] A failed job detail shows its persisted error code and message, **Resume Job**, and **Retry Turn** on the current turn.
+- [ ] **Resume Job** on a failed, `paused_dispatch`, or `paused_storage` job starts a new manual attempt and does not reset automatic recovery counters.
+- [ ] **Retry Turn** rejects a turn index other than the current one with HTTP 409 `turn_not_current`; a non-recoverable status returns 409 `job_not_recoverable`.
+- [ ] Creating a job with an external `previous_response_id` shows that ID as the initial anchor, records the `external_previous_response_id:<id>` warning, and replaces it after turn 1 is accepted.
+- [ ] Accepted and latest-attempt provider response IDs are visible in the job detail and in each turn row.
+- [ ] **Count Tokens** succeeds for each pending turn; with an invalid provider credential it shows a sanitized provider status/code and the **Health Check** probes report the failure without exposing the secret.
+- [ ] A job-scoped **Health Check** reports main and judge latency, OpenAI status, model-list count, and model presence.
+- [ ] JSONL export of a failed or incomplete job is parseable line-by-line, includes job/turn/attempt/judge-call summaries, and contains no request BLOBs or credentials.
+
 ### Exports
 - [ ] A completed job shows **Download Final Markdown**; the `.md` attachment concatenates accepted deliverables with `<!-- TURN_END:n -->` markers stripped.
 - [ ] A Markdown export captures the accepted-prefix boundary at export start; later acceptances do not appear.
@@ -355,6 +369,12 @@ Helpers must intercept outbound `fetch` at the `ProviderIO` seam so canonical-re
 - `src/lib/markdown.ts` has explicit tests for raw-HTML neutralization, unsafe link/image protocols, and the 250,000/250,001 character boundary; `src/handlers/jobs.ts` fragment routes assert HTML content type, no-store caching, `404` for missing jobs, and escaping of hostile job metadata.
 - `src/lib/judge.ts` stateful history has explicit tests for both commit-before-success and failure-before-response-ID-commit attachment behavior.
 - `src/do/job-do.ts` branch activation has an explicit superseding-race test.
+- `src/handlers/health.ts` probes parse only the OpenAI status indicator/description and model IDs; error text is redacted, and tests cover 400/404/405/502 plus main-only and job-scoped judge probes. `test/integration/operator-api.test.ts` mocks status and model endpoints and asserts no real provider call.
+- Provider error text is bounded and redacted before persistence/export. Tests assert exact secret values, Bearer, `sk-`, JWT, query-key, and `x-api-key` forms disappear on dispatch/retrieval/model errors; provider error codes over 64 characters normalize to null.
+- `/api/health` rejects cross-site browser probes, path-unsafe `jobId` values, and does not disclose missing secret binding names. Lookalike `api.openai.com.*` hosts do not inherit OpenAI status.
+- Job fragments assert escaped error banners, Resume/Retry/JSONL controls, external initial-response anchors, and active response anchors.
+- Token-preview integration asserts the count request omits generation-only fields (`background`, `service_tier`, `max_output_tokens`, `prompt_cache_retention`) and projects the mocked provider input tokens.
+- JSONL export tests parse every line from a failed job, require job/turn/attempt records, and assert provider diagnostics without request BLOBs or credentials.
 - Test files use `reset()` and `abortAllDurableObjects()` in `afterEach` and settle all scheduled alarms before finishing; no test relies on fresh Durable Object IDs as its primary isolation mechanism.
 - `waitUntil` promises are settled with `waitOnExecutionContext` or an equivalent explicit await; no test finishes with outstanding background work.
 - Manual verification is required for any deployment-level change; CI cannot substitute for it.

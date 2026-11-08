@@ -24,6 +24,7 @@ import {
 } from "../constants.ts";
 import { now } from "./clock.ts";
 import { assertFileUploadSize } from "./guards.ts";
+import { redactSensitiveText } from "./redaction.ts";
 import { HttpError, fetchWithAbort, readBoundedBytes } from "../http.ts";
 import type {
   ContextTier,
@@ -55,7 +56,7 @@ export function resolveEnvSecret(env: Env, secretName: string): string {
   }
   const value = env[trimmedName];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Missing or empty Worker secret binding: ${trimmedName}`);
+    throw new Error("Missing or empty Worker secret binding");
   }
   return value;
 }
@@ -121,15 +122,42 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function extractProviderError(parsedBody: unknown, fallbackStatus: number): ParsedProviderError {
+const MAX_PROVIDER_ERROR_MESSAGE_LENGTH = 2_000;
+const MAX_PROVIDER_ERROR_CODE_LENGTH = 64;
+
+function normalizeProviderErrorCode(code: string | null): string | null {
+  if (code === null || code.length === 0) return null;
+  const trimmed = code.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > MAX_PROVIDER_ERROR_CODE_LENGTH ||
+    !/^[A-Za-z0-9_.:-]+$/.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+function extractProviderError(
+  parsedBody: unknown,
+  fallbackStatus: number,
+  secrets: readonly string[] = [],
+): ParsedProviderError {
   if (isPlainRecord(parsedBody)) {
     const errObj = isPlainRecord(parsedBody.error) ? parsedBody.error : parsedBody;
-    const code = typeof errObj.code === "string" && errObj.code.length > 0 ? errObj.code : null;
+    const code = normalizeProviderErrorCode(
+      typeof errObj.code === "string" && errObj.code.length > 0 ? errObj.code : null,
+    );
     const type = typeof errObj.type === "string" && errObj.type.length > 0 ? errObj.type : null;
-    const message =
+    const rawMessage =
       typeof errObj.message === "string" && errObj.message.length > 0
         ? errObj.message
         : `Provider returned HTTP ${fallbackStatus}`;
+    const redacted = redactSensitiveText(rawMessage, secrets);
+    const message =
+      redacted.length > MAX_PROVIDER_ERROR_MESSAGE_LENGTH
+        ? `${redacted.slice(0, MAX_PROVIDER_ERROR_MESSAGE_LENGTH)}...`
+        : redacted;
     return { code, type, message };
   }
   return {
@@ -215,7 +243,10 @@ export async function dispatchResponsesCreate(
     );
   } catch (err: unknown) {
     const reason = classifyCatchReason(err);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = redactSensitiveText(
+      err instanceof Error ? err.message : String(err),
+      [params.apiKey],
+    );
     return {
       kind: "ambiguous_dispatch",
       reason,
@@ -232,13 +263,16 @@ export async function dispatchResponsesCreate(
         kind: "terminal_error",
         statusCode: 413,
         errorCode: err.code,
-        message: err.message,
+        message: redactSensitiveText(err.message, [params.apiKey]),
       };
     }
     return {
       kind: "ambiguous_dispatch",
       reason: classifyCatchReason(err),
-      message: err instanceof Error ? err.message : String(err),
+      message: redactSensitiveText(
+        err instanceof Error ? err.message : String(err),
+        [params.apiKey],
+      ),
     };
   }
 
@@ -255,7 +289,7 @@ export async function dispatchResponsesCreate(
   }
 
   if (response.status === 429) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     return {
       kind: "capacity_unavailable",
       statusCode: 429,
@@ -265,7 +299,7 @@ export async function dispatchResponsesCreate(
   }
 
   if (response.status === 503) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
     if (retryAfterMs !== null || isCapacityErrorCode(errInfo.code, errInfo.type, errInfo.message)) {
       return {
@@ -283,7 +317,7 @@ export async function dispatchResponsesCreate(
   }
 
   if (response.status >= 500) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     return {
       kind: "ambiguous_dispatch",
       reason: "server_5xx",
@@ -292,7 +326,7 @@ export async function dispatchResponsesCreate(
   }
 
   if (response.status >= 400) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     return {
       kind: "terminal_error",
       statusCode: response.status,
@@ -510,7 +544,7 @@ export async function retrieveProviderResponse(
   }
 
   if (!response.ok) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     throw new HttpError(response.status, errInfo.code ?? "provider_error", errInfo.message);
   }
 
@@ -681,7 +715,7 @@ export async function countResponsesInputTokens(
   }
 
   if (!response.ok) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     throw new HttpError(response.status, errInfo.code ?? "token_count_failed", errInfo.message);
   }
 
@@ -763,7 +797,7 @@ export async function uploadUserDataFile(
   }
 
   if (!response.ok) {
-    const errInfo = extractProviderError(parsed, response.status);
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
     throw new HttpError(response.status, errInfo.code ?? "file_upload_failed", errInfo.message);
   }
 
@@ -820,4 +854,77 @@ export async function deleteProviderFile(
     deleted: response.ok,
     status: response.status,
   };
+}
+
+export interface ListProviderModelsParams {
+  readonly apiKey: string;
+  readonly apiRoot?: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly fetchImpl?: typeof fetch;
+}
+
+/**
+ * Lists models available to the supplied API key (`GET /models`).
+ *
+ * Returns provider model identifiers only. A non-2xx status or a body that does
+ * not match the documented `{ data: [{ id: string }] }` shape becomes an
+ * `HttpError`; the raw provider body is never returned to callers.
+ */
+export async function listProviderModels(
+  params: ListProviderModelsParams,
+): Promise<{ readonly modelIds: readonly string[] }> {
+  const apiRoot = normalizeApiRoot(params.apiRoot);
+  const url = `${apiRoot}/models`;
+
+  const response = await performRequest(
+    url,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        Accept: "application/json",
+      },
+    },
+    params,
+  );
+
+  const rawBytes = await readBoundedBytes(response, ARTIFACT_ROW_GUARD_BYTES, params.signal);
+  const rawText = utf8Decoder.decode(rawBytes);
+
+  let parsed: unknown = null;
+  if (rawText.trim().length > 0) {
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      throw new HttpError(502, "invalid_provider_json", "Models response was not valid JSON");
+    }
+  }
+
+  if (!response.ok) {
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
+    throw new HttpError(response.status, errInfo.code ?? "models_list_failed", errInfo.message);
+  }
+
+  if (!isPlainRecord(parsed) || !Array.isArray(parsed.data)) {
+    throw new HttpError(
+      502,
+      "invalid_models_response",
+      "Provider models response did not include a data array",
+    );
+  }
+
+  const modelIds: string[] = [];
+  for (const item of parsed.data) {
+    if (!isPlainRecord(item) || typeof item.id !== "string" || item.id.length === 0) {
+      throw new HttpError(
+        502,
+        "invalid_models_response",
+        "Provider models response contained an entry without a valid id",
+      );
+    }
+    modelIds.push(item.id);
+  }
+
+  return { modelIds };
 }

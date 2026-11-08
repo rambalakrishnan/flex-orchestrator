@@ -170,9 +170,31 @@ async function createMarginalPreview(request: Request, env: Env): Promise<Respon
         }),
     );
     marginalInputTokens = counted.inputTokens;
-  } catch {
-    // A count failure never yields a projection: return a stable sanitized 5xx
-    // and never echo the raw provider body, headers, or credentials.
+  } catch (err: unknown) {
+    // A count failure never yields a projection, and the raw provider body,
+    // headers, and credentials are never echoed. An `HttpError` from the
+    // provider layer contributes only its status code and machine code.
+    if (err instanceof HttpError) {
+      const providerCode = err.code.trim();
+      const safeProviderCode =
+        providerCode.length > 0 &&
+        providerCode.length <= 64 &&
+        /^[A-Za-z0-9_.:-]+$/.test(providerCode)
+          ? providerCode
+          : null;
+      const codeSuffix = safeProviderCode === null ? "" : ` ${safeProviderCode}`;
+      return toErrorResponse(
+        new HttpError(
+          502,
+          "token_count_failed",
+          `Provider token count request failed (HTTP ${err.status}${codeSuffix})`,
+          {
+            provider_status: err.status,
+            provider_code: safeProviderCode,
+          },
+        ),
+      );
+    }
     return toErrorResponse(
       new HttpError(502, "token_count_failed", "Provider token count request failed"),
     );

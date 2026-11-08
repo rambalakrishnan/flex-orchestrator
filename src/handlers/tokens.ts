@@ -17,6 +17,7 @@
 import {
   COMPATIBILITY,
   DEFAULT_MAX_JSON_BODY_BYTES,
+  REASONING_EFFORT_LEVELS,
   isVerifiedGenerationModel,
 } from "../constants.ts";
 import {
@@ -36,6 +37,7 @@ import { DEFAULT_OPENAI_TIMEOUT_MS, countResponsesInputTokens, resolveEnvSecret 
 import { buildMarginalTokenPreview } from "../lib/tokens.ts";
 import type {
   CacheTtl,
+  FileId,
   JobStateResponse,
   MarginalTokenPreviewRequest,
   ReasoningEffort,
@@ -63,6 +65,8 @@ interface PreviewContext {
   readonly cacheTtl: CacheTtl;
   readonly previousResponseId: ResponseId | null;
   readonly turnIndex: TurnIndex;
+  readonly developerPrompt: string;
+  readonly developerFileIds: readonly FileId[];
 }
 
 /** Structural view of the `JobDO` binding RPC used by the preview. */
@@ -141,6 +145,8 @@ async function createMarginalPreview(request: Request, env: Env): Promise<Respon
     attemptKind: "initial",
     promptText: previewRequest.promptText,
     attachmentFileIds: previewRequest.attachmentFileIds,
+    developerPrompt: previewRequest.developerPrompt ?? context.developerPrompt,
+    developerFileIds: previewRequest.developerFileIds ?? context.developerFileIds,
     previousResponseId: context.previousResponseId,
   });
 
@@ -220,6 +226,26 @@ function validatePreviewRequest(value: unknown): MarginalTokenPreviewRequest {
     attachmentFileIds.push(fileId);
   }
 
+  const rawDeveloperPrompt = record.developerPrompt;
+  if (rawDeveloperPrompt !== undefined && typeof rawDeveloperPrompt !== "string") {
+    throw invalidPreviewRequest("developerPrompt must be a string when provided");
+  }
+
+  const rawDeveloperFileIds = record.developerFileIds;
+  let developerFileIds: string[] | undefined;
+  if (rawDeveloperFileIds !== undefined) {
+    if (!Array.isArray(rawDeveloperFileIds)) {
+      throw invalidPreviewRequest("developerFileIds must be an array of non-empty strings");
+    }
+    developerFileIds = [];
+    for (const fileId of rawDeveloperFileIds as readonly unknown[]) {
+      if (typeof fileId !== "string" || fileId.length === 0) {
+        throw invalidPreviewRequest("developerFileIds must be an array of non-empty strings");
+      }
+      developerFileIds.push(fileId);
+    }
+  }
+
   const maxOutputTokens = record.maxOutputTokens;
   if (
     typeof maxOutputTokens !== "number" ||
@@ -230,12 +256,10 @@ function validatePreviewRequest(value: unknown): MarginalTokenPreviewRequest {
   }
 
   const rawReasoningEffort = record.reasoningEffort;
-  if (
-    rawReasoningEffort !== "low" &&
-    rawReasoningEffort !== "medium" &&
-    rawReasoningEffort !== "high"
-  ) {
-    throw invalidPreviewRequest("reasoningEffort must be one of: low, medium, high");
+  if (!isReasoningEffortLevel(rawReasoningEffort)) {
+    throw invalidPreviewRequest(
+      `reasoningEffort must be one of: ${REASONING_EFFORT_LEVELS.join(", ")}`,
+    );
   }
   const reasoningEffort: ReasoningEffort = rawReasoningEffort;
 
@@ -251,6 +275,8 @@ function validatePreviewRequest(value: unknown): MarginalTokenPreviewRequest {
     maxOutputTokens,
     reasoningEffort,
     webSearch,
+    ...(typeof rawDeveloperPrompt === "string" ? { developerPrompt: rawDeveloperPrompt } : {}),
+    ...(developerFileIds !== undefined ? { developerFileIds } : {}),
     ...(typeof rawJobId === "string" ? { jobId: rawJobId } : {}),
   };
   return request;
@@ -258,6 +284,18 @@ function validatePreviewRequest(value: unknown): MarginalTokenPreviewRequest {
 
 function invalidPreviewRequest(message: string): HttpError {
   return new HttpError(422, "unprocessable_entity", message);
+}
+
+/**
+ * Narrows a raw request value against the authoritative
+ * `REASONING_EFFORT_LEVELS` list, so newly added levels need no change here.
+ */
+function isReasoningEffortLevel(
+  value: unknown,
+): value is (typeof REASONING_EFFORT_LEVELS)[number] {
+  return (
+    typeof value === "string" && (REASONING_EFFORT_LEVELS as readonly string[]).includes(value)
+  );
 }
 
 /**
@@ -274,6 +312,8 @@ async function resolvePreviewContext(
       cacheTtl: "nocache",
       previousResponseId: null,
       turnIndex: PREVIEW_TURN_INDEX,
+      developerPrompt: "",
+      developerFileIds: [],
     };
   }
 
@@ -287,6 +327,8 @@ async function resolvePreviewContext(
     cacheTtl: state.job.config.cacheTtl,
     previousResponseId: state.job.lastAcceptedResponseId,
     turnIndex: state.job.currentTurnIndex,
+    developerPrompt: state.job.config.developerPrompt,
+    developerFileIds: state.job.config.developerFileIds,
   };
 }
 

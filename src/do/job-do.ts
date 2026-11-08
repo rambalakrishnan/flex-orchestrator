@@ -777,6 +777,16 @@ function attemptRowToRecord(
   };
 }
 
+/**
+ * Provider-reported input tokens for a settled attempt, frozen into the turn at
+ * acceptance. Returns null when the attempt has not recorded usage.
+ */
+function attemptMarginalInputTokens(
+  attempt: GenerationAttemptSummaryRow
+): number | null {
+  return parseTokenUsage(attempt.usage_json)?.inputTokens ?? null;
+}
+
 function judgeCallRowToRecord(
   row: JudgeCallSummaryRow,
   jobId: JobId,
@@ -843,6 +853,7 @@ function turnRowToRecord(
     activeAttemptId,
     acceptedAttemptId: row.accepted_attempt_id,
     acceptedDeliverableBytes,
+    marginalInputTokens: row.marginal_input_tokens,
     acceptedResponseId: row.accepted_response_id,
     judgeCallId,
     warningMessages: [],
@@ -1305,6 +1316,10 @@ export class JobDO extends DurableObject<Env> {
         }
 
         const candidateId = `${branchJobId}:t${turn.turnIndex}:branch`;
+        const acceptingAttempt = turnSnapshot.attempts.find(
+          (candidate) => candidate.attemptId === acceptedAttemptId
+        );
+        const marginalInputTokens = acceptingAttempt?.usage?.inputTokens ?? null;
         insertTurnCandidate(this.sql, {
           candidateId,
           turnIndex: turn.turnIndex,
@@ -1339,6 +1354,7 @@ export class JobDO extends DurableObject<Env> {
                  accepted_attempt_id = ?,
                  accepted_response_id = ?,
                  accepted_with_warning = ?,
+                 marginal_input_tokens = ?,
                  row_bytes = ?,
                  updated_at = ?
              WHERE turn_index = ?`,
@@ -1346,6 +1362,7 @@ export class JobDO extends DurableObject<Env> {
             acceptedAttemptId,
             acceptedResponseId,
             turn.status === "accepted_with_warning" ? 1 : 0,
+            marginalInputTokens,
             turnRowBytes,
             nowIso,
             turn.turnIndex
@@ -3684,6 +3701,10 @@ export class JobDO extends DurableObject<Env> {
 
     const nowIso = toIso(now());
     const warningJson = JSON.stringify([...warnings]);
+    // Settlement writes `usage_json` after the attempt summary captured at claim
+    // time, so re-read the persisted row to freeze the provider-reported count.
+    const acceptedAttempt =
+      getGenerationAttemptSummary(this.sql, attempt.attempt_id) ?? attempt;
     try {
       acceptTurnCandidate(this.storage, {
         jobId: job.job_id,
@@ -3693,6 +3714,7 @@ export class JobDO extends DurableObject<Env> {
         responseId: attempt.provider_response_id,
         acceptedWithWarning,
         warningJson,
+        marginalInputTokens: attemptMarginalInputTokens(acceptedAttempt),
         nowIso,
       });
     } catch (error) {
@@ -3816,6 +3838,7 @@ export class JobDO extends DurableObject<Env> {
       responseId: attempt.provider_response_id,
       acceptedWithWarning: true,
       warningJson: JSON.stringify(warnings),
+      marginalInputTokens: attemptMarginalInputTokens(attempt),
       nowIso,
     });
 

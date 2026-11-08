@@ -398,6 +398,9 @@ describe("JobDO generation lifecycle", () => {
     expect(settled.turns[0]!.acceptedResponseId).toBe("resp_1");
     expect(settled.activeAttempt).toBeNull();
     expect(settled.usage.generationCalls).toBe(1);
+    expect(settled.turns[0]!.marginalInputTokens).toBe(12);
+    const acceptedTurns = await stub.listTurns({ limit: 1 });
+    expect(acceptedTurns.items[0]!.marginal_input_tokens).toBe(12);
 
     const deliverable = await stub.readArtifact({
       kind: "candidate_deliverable",
@@ -450,5 +453,8 @@ describe("JobDO generation lifecycle", () => {
     expect(branchState.job.acceptedTurnCount).toBe(1);
     expect(branchState.turns[0]!.status).toBe("accepted");
     expect(branchState.turns[0]!.acceptedDeliverableBytes).toBe("hello".length);
+    expect(branchState.turns[0]!.marginalInputTokens).toBe(12);
+    const branchTurns = await child.listTurns({ limit: 1 });
+    expect(branchTurns.items[0]!.marginal_input_tokens).toBe(12);
   });
 });

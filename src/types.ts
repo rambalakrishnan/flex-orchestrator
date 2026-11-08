@@ -328,6 +328,7 @@ export interface TurnRecord {
   readonly activeAttemptId: AttemptId | null;
   readonly acceptedAttemptId: AttemptId | null;
   readonly acceptedDeliverableBytes: number | null;
+  readonly marginalInputTokens: number | null;
   readonly acceptedResponseId: ResponseId | null;
   readonly judgeCallId: JudgeCallId | null;
   readonly warningMessages: readonly string[];

@@ -71,6 +71,7 @@ export interface AcceptTurnCandidateParams {
   readonly responseId: string;
   readonly acceptedWithWarning: boolean;
   readonly warningJson?: string;
+  readonly marginalInputTokens?: number | null;
   readonly nowIso: string;
 }
 
@@ -456,7 +457,8 @@ export function listTurnCandidateSummaries(
  *    and has `deliverable_bytes > 0`.
  * 2. Verifies the resulting `turns` and `trust/candidate` row byte guards.
  * 3. Marks `accepted = 1` (and updates `warning_json` if provided) on `turn_candidates`.
- * 4. Marks `turns` as `status = 'accepted'` with the accepted candidate/attempt/response anchors.
+ * 4. Marks `turns` as `status = 'accepted'` with the accepted candidate/attempt/response anchors
+ *    and freezes the provider-reported `marginal_input_tokens` supplied by the caller.
  * 5. Updates `jobs` (`accepted_turn_index = MAX(accepted_turn_index, ?)`, `last_accepted_response_id = ?`,
  *    `revision = revision + 1`, `updated_at = ?`).
  */
@@ -551,6 +553,7 @@ export function acceptTurnCandidate(
              accepted_attempt_id = ?,
              accepted_response_id = ?,
              accepted_with_warning = ?,
+             marginal_input_tokens = ?,
              row_bytes = ?,
              updated_at = ?
          WHERE turn_index = ?`,
@@ -558,6 +561,7 @@ export function acceptTurnCandidate(
         params.attemptId,
         params.responseId,
         params.acceptedWithWarning ? 1 : 0,
+        params.marginalInputTokens ?? null,
         updatedTurnRowBytes,
         params.nowIso,
         params.turnIndex

@@ -272,6 +272,8 @@ Cover: `src/do/*.ts`, `src/db/*.ts`, `src/lib/alarm.ts`.
 These checks exercise real Cloudflare and OpenAI infrastructure and cannot be fully automated. Run them once per deployment change and after any `wrangler.toml` edit.
 
 ### Deployment and routing
+- [ ] A first deploy with `HOOKS_HOST`, `OPENAI_WEBHOOK_SECRET`, or `OPENAI_API_KEY` missing fails before uploading code and names every missing required secret.
+- [ ] `npx wrangler secret put HOOKS_HOST` (creating the stub Worker when prompted) followed by `wrangler deploy` succeeds, and a `wrangler deploy --secrets-file <gitignored-file>` path also succeeds.
 - [ ] `workers.dev` and preview URLs are unreachable for the application hostname.
 - [ ] `app.example.com` is reachable only through Cloudflare Access; unauthenticated requests are redirected to the Access login.
 - [ ] `hooks.example.com` is reachable without Access; other paths on that hostname return 404.

@@ -48,22 +48,30 @@ new_sqlite_classes = ["JobDO", "RouterDO", "RegistryDO"]
 FILE_RETENTION_SECONDS = "604800"
 JUDGE_DEFAULT_MODEL = "your-judge-model"
 
-# HOOKS_HOST is configured as a runtime variable in the Cloudflare Dashboard (README §2).
+[secrets]
+required = [
+  "HOOKS_HOST",
+  "OPENAI_WEBHOOK_SECRET",
+  "OPENAI_API_KEY",
+]
 ```
 
-`FILE_RETENTION_SECONDS` controls file cleanup retention. `JUDGE_DEFAULT_MODEL` seeds the judge panel’s model field.
+`FILE_RETENTION_SECONDS` controls file cleanup retention. `JUDGE_DEFAULT_MODEL` seeds the judge panel’s model field. The `[secrets] required` list is committed by name only; Wrangler refuses to deploy until every listed secret exists, so a new operator gets an immediate, named failure instead of a Worker that misroutes webhooks. Set each value for your own deployment; never commit secret values.
 
 ### 2. Install, authenticate, and deploy
 
 ```bash
 npm install
 npx wrangler login
+npx wrangler secret put HOOKS_HOST
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put OPENAI_WEBHOOK_SECRET
 # Add the judge secret named in each job’s judge configuration:
 # npx wrangler secret put <JUDGE_SECRET_NAME>
 npx wrangler deploy
 ```
+
+On a fresh account the first `npx wrangler secret put` offers to create a stub Worker for the secret; accept it, set the remaining secrets, then deploy. For a single-command first deployment (for example in CI), `npx wrangler deploy --secrets-file <local-file>` accepts a gitignored `NAME=value` file; `.secrets.env` and `.dev.vars` are already ignored by this repository.
 
 Set the judge credential named in each job’s judge configuration, using that configuration’s secret name. Credentials remain server-side secrets and are absent from stored request headers, logs, and exports.
 
@@ -80,13 +88,13 @@ Because `wrangler.toml` deliberately omits `routes`, Wrangler deploys the Worker
 
 The Worker is now only reachable on these two hostnames. `workers.dev` and preview URLs remain disabled.
 
-### 2. Configure the webhook host variable
+### 2. Configure the webhook host secret
 
-Add a runtime variable so the Worker can distinguish the public webhook from the Access-protected application.
+`wrangler.toml` declares `HOOKS_HOST` in `[secrets] required` so a deployment fails fast when the host is missing. Keeping it a secret also keeps your custom hostname out of the public repository while still documenting the requirement for other operators.
 
-1. Go to **Workers & Pages → flex-orchestrator → Settings → Variables**.
-2. Add a new variable: **Name** `HOOKS_HOST`, **Value** `hooks.example.com` (your webhook hostname).
-3. Save and redeploy if prompted.
+1. Run `npx wrangler secret put HOOKS_HOST` and enter your webhook hostname, for example `hooks.example.com`. On a fresh project Wrangler offers to create a stub Worker for the secret; accept it.
+2. Alternatively, once the Worker exists, open **Workers & Pages → flex-orchestrator → Settings → Variables and Secrets** and add `HOOKS_HOST` as a secret.
+3. Deploy. A deploy with the secret missing fails before uploading code and names the missing secret.
 
 The Worker treats `HOOKS_HOST` as the public webhook ingress and every other reachable host as the application. Because only the two custom domains above reach the Worker, unexpected hosts cannot expose the application.
 

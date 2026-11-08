@@ -8,7 +8,7 @@
  *
  * Note:
  * - Secrets (`OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and dynamic judge secrets
- *   resolved via `getEnvSecret`) and the runtime variable `HOOKS_HOST` are raw
+ *   resolved via `getEnvSecret`) and the required secret `HOOKS_HOST` are raw
  *   `string` bindings at the Worker boundary; never `CryptoKey`s (which must be
  *   imported inside handlers because Durable Objects evict in-memory state).
  * - No separate application-host binding is defined: the webhook ingress is served

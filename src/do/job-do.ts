@@ -43,6 +43,7 @@ import {
   insertTurnCandidate,
   listTurnCandidateSummaries,
   listTurnSummaries,
+  updateTurnPrompt,
   updateTurnStatus,
 } from "../db/turns.ts";
 import {
@@ -377,6 +378,12 @@ function parseJudgeConfig(raw: string): JudgeConfig {
   if (parsed.developerPrompt !== undefined && typeof parsed.developerPrompt !== "string") {
     throw new Error("jobs.judge_config_json developerPrompt must be a string");
   }
+  if (parsed.injectOnFail !== undefined && typeof parsed.injectOnFail !== "boolean") {
+    throw new Error("jobs.judge_config_json injectOnFail must be boolean");
+  }
+  if (parsed.injectOnPass !== undefined && typeof parsed.injectOnPass !== "boolean") {
+    throw new Error("jobs.judge_config_json injectOnPass must be boolean");
+  }
   if (
     typeof parsed.provider !== "string" ||
     typeof parsed.apiRoot !== "string" ||
@@ -401,6 +408,10 @@ function parseJudgeConfig(raw: string): JudgeConfig {
     fileDeliveryMode: parsed.fileDeliveryMode,
     includePrior: parsed.includePrior,
     maxGradeThreshold: parsed.maxGradeThreshold,
+    injectOnFail:
+      typeof parsed.injectOnFail === "boolean" ? parsed.injectOnFail : true,
+    injectOnPass:
+      typeof parsed.injectOnPass === "boolean" ? parsed.injectOnPass : false,
     developerPrompt:
       typeof parsed.developerPrompt === "string" ? parsed.developerPrompt : "",
   };
@@ -2889,8 +2900,11 @@ export class JobDO extends DurableObject<Env> {
         );
         return;
 
-      case "wrong_index":
       case "missing_tag":
+        await this.continueOrFailIncomplete(job, attempt);
+        return;
+
+      case "wrong_index":
       case "malformed_tag":
         await this.failTurnAndJob(
           job,
@@ -3246,6 +3260,7 @@ export class JobDO extends DurableObject<Env> {
           candidate,
           false,
           structuralWarnings,
+          null,
           null
         );
       } else {
@@ -3577,6 +3592,7 @@ export class JobDO extends DurableObject<Env> {
           candidate,
           false,
           structuralWarnings,
+          null,
           null
         );
       } else {
@@ -3601,6 +3617,7 @@ export class JobDO extends DurableObject<Env> {
           candidate,
           true,
           warnings,
+          null,
           null
         );
       } else {
@@ -3619,21 +3636,31 @@ export class JobDO extends DurableObject<Env> {
     const output = outcome.output;
     const coverageWarning =
       outcome.advisoryWarnings.length > 0 || output.file_visibility === false;
-    const pausesForReview =
+    const judgeFailed =
       output.verdict === "FAIL" ||
-      (config.enabled && output.grade > config.maxGradeThreshold) ||
-      output.tag_agreement === false ||
-      !allowAcceptance;
+      (config.enabled && output.grade < config.maxGradeThreshold);
+    const tagDisagreement = output.tag_agreement === false;
+    const canAutoRetry = judgeFailed && !tagDisagreement && allowAcceptance;
 
-    if (pausesForReview) {
+    if (judgeFailed || tagDisagreement || !allowAcceptance) {
+      if (canAutoRetry && job.auto_retries_used < job.auto_retry_budget) {
+        await this.retryAfterJudgeCritique(
+          job,
+          attempt,
+          config.enabled ? config.injectOnFail : false,
+          output.verdict === "FAIL" ? "judge_rejected" : "grade_below_minimum",
+          output.comment
+        );
+        return;
+      }
       const reasons: string[] = [];
       if (output.verdict === "FAIL") {
         reasons.push("judge_rejected");
       }
-      if (config.enabled && output.grade > config.maxGradeThreshold) {
-        reasons.push("excessive_grade");
+      if (config.enabled && output.grade < config.maxGradeThreshold) {
+        reasons.push("grade_below_minimum");
       }
-      if (output.tag_agreement === false) {
+      if (tagDisagreement) {
         reasons.push("judge_tag_disagreement");
       }
       if (!allowAcceptance) {
@@ -3649,6 +3676,10 @@ export class JobDO extends DurableObject<Env> {
       return;
     }
 
+    const steeringNote =
+      config.enabled && config.injectOnPass && output.comment.trim().length > 0
+        ? output.comment
+        : null;
     const warnings = [
       ...structuralWarnings,
       ...outcome.advisoryWarnings,
@@ -3663,7 +3694,65 @@ export class JobDO extends DurableObject<Env> {
       candidate,
       coverageWarning,
       warnings,
-      outcome.responseId
+      outcome.responseId,
+      steeringNote
+    );
+  }
+
+  /**
+   * Consumes one automatic retry for a judge rejection or a grade below the configured
+   * minimum: atomically records the retry, optionally appends the critique to the turn
+   * prompt, then dispatches a fresh `auto_retry` attempt for the same turn.
+   */
+  private async retryAfterJudgeCritique(
+    job: JobRow,
+    attempt: GenerationAttemptSummaryRow,
+    injectOnFail: boolean,
+    failureCode: string,
+    comment: string
+  ): Promise<void> {
+    const nowIso = toIso(now());
+    try {
+      this.storage.transactionSync(() => {
+        if (injectOnFail) {
+          const promptText = getTurnPromptText(this.sql, attempt.turn_index) ?? "";
+          updateTurnPrompt(
+            this.sql,
+            attempt.turn_index,
+            `${promptText}\n\n### JUDGE CRITIQUE:\n${comment}\n\nRevise your output to address this.`,
+            nowIso
+          );
+        }
+        updateJobStatusAndRevision(this.sql, {
+          jobId: job.job_id,
+          status: "running",
+          activeAttemptId: null,
+          currentTurnIndex: attempt.turn_index,
+          autoRetriesUsed: job.auto_retries_used + 1,
+          lastErrorCode: failureCode,
+          lastErrorDetail: comment,
+          updatedAt: nowIso,
+        });
+      });
+    } catch (error) {
+      if (error instanceof ArtifactGuardError || error instanceof StorageFullError) {
+        await this.pauseStorage(
+          job.job_id,
+          attempt.turn_index,
+          attempt.attempt_id,
+          describeError(error)
+        );
+        return;
+      }
+      throw error;
+    }
+    const fresh = requireJob(this.sql, job.job_id);
+    await this.startGenerationAttempt(
+      fresh.job_id,
+      attempt.turn_index,
+      "auto_retry",
+      0,
+      null
     );
   }
 
@@ -3674,7 +3763,8 @@ export class JobDO extends DurableObject<Env> {
     candidate: TurnCandidateSummaryRow,
     acceptedWithWarning: boolean,
     warnings: readonly string[],
-    judgeResponseId: string | null
+    judgeResponseId: string | null,
+    steeringNote: string | null
   ): Promise<void> {
     if (attempt.provider_response_id === null) {
       await this.pauseStorage(
@@ -3700,6 +3790,34 @@ export class JobDO extends DurableObject<Env> {
     }
 
     const nowIso = toIso(now());
+    if (steeringNote !== null) {
+      const nextTurn = getTurnSummary(this.sql, turn.turn_index + 1);
+      if (nextTurn !== null && nextTurn.status === "pending") {
+        const nextPromptText = getTurnPromptText(this.sql, nextTurn.turn_index) ?? "";
+        try {
+          updateTurnPrompt(
+            this.sql,
+            nextTurn.turn_index,
+            `${nextPromptText}\n\n### PM STEERING NOTE:\n${steeringNote}`,
+            nowIso
+          );
+        } catch (error) {
+          if (
+            error instanceof ArtifactGuardError ||
+            error instanceof StorageFullError
+          ) {
+            await this.pauseStorage(
+              job.job_id,
+              turn.turn_index,
+              attempt.attempt_id,
+              describeError(error)
+            );
+            return;
+          }
+          throw error;
+        }
+      }
+    }
     const warningJson = JSON.stringify([...warnings]);
     // Settlement writes `usage_json` after the attempt summary captured at claim
     // time, so re-read the persisted row to freeze the provider-reported count.

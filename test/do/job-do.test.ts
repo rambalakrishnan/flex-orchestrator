@@ -21,6 +21,7 @@ import type {
   CursorPageRequest,
   ExportHighWaterMarks,
   JobConfig,
+  JudgeConfig,
   JobStateResponse,
   OperatorReviewDecision,
   VerifiedWebhookEvent,
@@ -57,6 +58,22 @@ interface JobDoTestStub {
     id: string | number;
   }): Promise<{ bytes: ArrayBuffer } | null>;
 }
+
+const ENABLED_JUDGE_CONFIG: Extract<JudgeConfig, { enabled: true }> = {
+  enabled: true,
+  provider: "openai",
+  apiRoot: "https://api.openai.com/v1",
+  secretName: "OPENAI_API_KEY",
+  model: "gpt-5",
+  transport: "responses",
+  historyMode: "stateless",
+  fileDeliveryMode: "passthrough",
+  includePrior: false,
+  maxGradeThreshold: 80,
+  injectOnFail: true,
+  injectOnPass: false,
+  developerPrompt: "",
+};
 
 const JOB_CONFIG: JobConfig = {
   model: "gpt-5",
@@ -456,5 +473,57 @@ describe("JobDO generation lifecycle", () => {
     expect(branchState.turns[0]!.marginalInputTokens).toBe(12);
     const branchTurns = await child.listTurns({ limit: 1 });
     expect(branchTurns.items[0]!.marginal_input_tokens).toBe(12);
+  });
+});
+
+describe("JobDO judge steering configuration", () => {
+  it("persists injection flags and defaults legacy persisted configs", async () => {
+    const jobId = nextJobId();
+    const stub = stubFor(jobId);
+    await stub.createJob({
+      jobId,
+      title: "explicit judge steering",
+      config: {
+        ...JOB_CONFIG,
+        judge: {
+          ...ENABLED_JUDGE_CONFIG,
+          injectOnFail: false,
+          injectOnPass: true,
+        },
+      },
+      initialTurns: [],
+    });
+
+    const state = await stub.getState();
+    if (state === null) throw new Error("expected job state");
+    const judge = state.job.config.judge;
+    expect(judge.enabled).toBe(true);
+    if (!judge.enabled) throw new Error("expected an enabled judge config");
+    expect(judge.injectOnFail).toBe(false);
+    expect(judge.injectOnPass).toBe(true);
+
+    const legacyJobId = nextJobId();
+    const legacyStub = stubFor(legacyJobId);
+    const legacyJudge = {
+      ...ENABLED_JUDGE_CONFIG,
+      injectOnFail: undefined,
+      injectOnPass: undefined,
+    } as unknown as JudgeConfig;
+    await legacyStub.createJob({
+      jobId: legacyJobId,
+      title: "legacy judge steering",
+      config: { ...JOB_CONFIG, judge: legacyJudge },
+      initialTurns: [],
+    });
+
+    const legacyState = await legacyStub.getState();
+    if (legacyState === null) throw new Error("expected legacy job state");
+    const legacyJudgeConfig = legacyState.job.config.judge;
+    expect(legacyJudgeConfig.enabled).toBe(true);
+    if (!legacyJudgeConfig.enabled) {
+      throw new Error("expected an enabled legacy judge config");
+    }
+    expect(legacyJudgeConfig.injectOnFail).toBe(true);
+    expect(legacyJudgeConfig.injectOnPass).toBe(false);
   });
 });

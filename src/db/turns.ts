@@ -26,6 +26,7 @@ import {
   type TurnRow,
   type TurnSummaryRow,
 } from "./schema";
+import type { TurnIndex } from "../types";
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: false });
 
@@ -271,6 +272,64 @@ export function updateTurnStatus(
         turnIndex
       );
     }
+  });
+}
+
+/**
+ * Replaces a turn's prompt text, re-measures the artifact and row byte guards, and
+ * updates `prompt_blob`, `prompt_bytes`, `row_bytes`, and `updated_at`.
+ *
+ * Used by autonomous judge steering to append a critique to a turn's prompt before
+ * the automatic retry is dispatched.
+ */
+export function updateTurnPrompt(
+  sql: SchemaSqlStorage,
+  turnIndex: TurnIndex,
+  promptText: string,
+  nowIso: string
+): TurnSummaryRow {
+  return withSqlErrorMapping(() => {
+    const rows = sql
+      .exec<TurnSummaryRow>(
+        `SELECT ${TURNS_SUMMARY_COLUMNS} FROM turns WHERE turn_index = ?`,
+        turnIndex
+      )
+      .toArray();
+    if (rows.length === 0) {
+      throw new Error(`Turn not found: ${turnIndex}`);
+    }
+    const turn = rows[0]!;
+
+    const { blob: promptBlob, byteLength: promptBytes } = toGuardedBlob(
+      promptText,
+      "turns.prompt_blob"
+    );
+    const metadataBytes =
+      measureByteLength(turn.attachment_file_ids_json) +
+      measureByteLength(turn.accepted_candidate_id) +
+      measureByteLength(turn.accepted_attempt_id) +
+      measureByteLength(turn.accepted_response_id);
+    const { rowBytes } = assertArtifactAndRowSize(
+      promptBytes,
+      metadataBytes,
+      "turns.row_bytes"
+    );
+
+    sql.exec(
+      "UPDATE turns SET prompt_blob = ?, prompt_bytes = ?, row_bytes = ?, updated_at = ? WHERE turn_index = ?",
+      promptBlob,
+      promptBytes,
+      rowBytes,
+      nowIso,
+      turnIndex
+    );
+
+    return {
+      ...turn,
+      prompt_bytes: promptBytes,
+      row_bytes: rowBytes,
+      updated_at: nowIso,
+    };
   });
 }
 

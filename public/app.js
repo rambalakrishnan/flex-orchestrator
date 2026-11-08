@@ -24,10 +24,20 @@ function setStatus(message) {
   formStatus.textContent = message;
 }
 
-function setTokenPreview(message, state) {
-  tokenPreview.textContent = message;
+function renderTokenPreview(lines, state) {
+  tokenPreview.replaceChildren(
+    ...lines.map((line) => {
+      const row = document.createElement("div");
+      row.textContent = line;
+      return row;
+    }),
+  );
   if (state === "ok" || state === "error") tokenPreview.dataset.state = state;
   else delete tokenPreview.dataset.state;
+}
+
+function setTokenPreview(message, state) {
+  renderTokenPreview(message.length === 0 ? [] : [message], state);
 }
 
 function describeError(error) {
@@ -271,17 +281,97 @@ function buildCreateJobCommand(params) {
   };
 }
 
-function buildTokenPreviewRequest(developerFileIds) {
+/**
+ * Token preview is first-class across the composer: one unit for the developer
+ * context plus one unit per current turn block. Every generation request carries
+ * the developer message, so turn units reuse the developer prompt and files.
+ */
+function collectTokenPreviewUnits() {
+  const units = [
+    {
+      label: "Developer context",
+      promptText: "",
+      files: developerFilesInput.files,
+      uploadTurnIndex: undefined,
+    },
+  ];
+  for (const block of turnBlocks()) {
+    const parsedIndex = Number(block.dataset.turnIndex);
+    const turnIndex =
+      Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : units.length;
+    const prompt = block.querySelector(".turn-prompt");
+    const filesInput = block.querySelector(".turn-files");
+    units.push({
+      label: "Turn " + turnIndex + " (incl. developer context)",
+      promptText: prompt === null ? "" : prompt.value,
+      files: filesInput === null ? [] : filesInput.files,
+      uploadTurnIndex: turnIndex,
+    });
+  }
+  return units;
+}
+
+/** Reads and validates the preview options shared by every unit. */
+function readTokenPreviewOptions() {
   return {
     model: readRequiredValue("job-model", "Model"),
-    promptText: "",
     developerPrompt: value("developer-prompt"),
-    developerFileIds,
-    attachmentFileIds: [],
     maxOutputTokens: readPositiveInteger("job-max-output-tokens", "Max output tokens"),
     reasoningEffort: value("job-reasoning"),
     webSearch: document.getElementById("job-web-search").checked,
   };
+}
+
+/** Posts one unit body and resolves with the validated preview response. */
+async function requestTokenPreview(body) {
+  const response = await fetch("/api/tokens/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+
+  let preview = null;
+  try {
+    preview = await response.json();
+  } catch {
+    throw new Error("token preview response was not JSON.");
+  }
+  if (preview === null || typeof preview !== "object") {
+    throw new Error("token preview response was not a JSON object.");
+  }
+  if (
+    typeof preview.projectedTotalInputTokens !== "number" ||
+    !Number.isFinite(preview.projectedTotalInputTokens)
+  ) {
+    throw new Error("token preview response is missing projectedTotalInputTokens.");
+  }
+  return preview;
+}
+
+/** Formats one admitted/rejected preview as a single plain-text line. */
+function describeTokenPreview(preview) {
+  let text = preview.projectedTotalInputTokens + " input tokens";
+  const admission = preview.admission;
+  if (admission !== null && typeof admission === "object" && admission.kind === "admitted") {
+    const contextTier =
+      typeof admission.contextTier === "string" ? admission.contextTier : "unknown";
+    text += " \u2014 admitted (context: " + contextTier + ")";
+  } else if (
+    admission !== null &&
+    typeof admission === "object" &&
+    admission.kind === "rejected"
+  ) {
+    text += " \u2014 rejected (" + admission.reason + ")";
+    if (typeof admission.message === "string" && admission.message.length > 0) {
+      text += ": " + admission.message;
+    }
+  } else {
+    text += " \u2014 admission unavailable";
+  }
+  return text;
 }
 
 function updateJudgePanel() {
@@ -294,66 +384,70 @@ async function countTokens() {
   countTokensButton.disabled = true;
   setTokenPreview("Counting tokens\u2026");
   try {
-    const developerFileIds = await uploadFiles(developerFilesInput.files);
-    const response = await fetch("/api/tokens/preview", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildTokenPreviewRequest(developerFileIds)),
-    });
-    if (!response.ok) {
-      setTokenPreview("Error: " + (await errorMessage(response)), "error");
-      return;
-    }
+    const options = readTokenPreviewOptions();
+    const units = collectTokenPreviewUnits();
 
-    let preview = null;
-    try {
-      preview = await response.json();
-    } catch {
-      setTokenPreview("Error: token preview response was not JSON.", "error");
-      return;
-    }
-    if (preview === null || typeof preview !== "object") {
-      setTokenPreview("Error: token preview response was not a JSON object.", "error");
-      return;
-    }
-
-    const projected = preview.projectedTotalInputTokens;
-    if (typeof projected !== "number" || !Number.isFinite(projected)) {
-      setTokenPreview(
-        "Error: token preview response is missing projectedTotalInputTokens.",
-        "error",
-      );
-      return;
-    }
-
-    let message = "Projected total input tokens: " + projected;
-    const admission = preview.admission;
-    if (admission !== null && typeof admission === "object" && admission.kind === "admitted") {
-      message += " | admission: admitted";
-      if (typeof admission.maxAllowedInputTokens === "number") {
-        message += " (max input " + admission.maxAllowedInputTokens + ")";
-      }
-      if (typeof admission.contextTier === "string") {
-        message += ", context: " + admission.contextTier;
-      }
-    } else if (
-      admission !== null &&
-      typeof admission === "object" &&
-      admission.kind === "rejected"
-    ) {
-      message += " | admission: rejected (" + admission.reason + ")";
-      if (typeof admission.message === "string" && admission.message.length > 0) {
-        message += " \u2014 " + admission.message;
-      }
-    } else {
-      message += " | admission: unavailable";
-    }
-    setTokenPreview(
-      message,
-      admission !== null && typeof admission === "object" && admission.kind === "admitted"
-        ? "ok"
-        : "error",
+    // Upload every unit's files first; each turn's files carry that turn index.
+    const uploads = await Promise.allSettled(
+      units.map((unit) => uploadFiles(unit.files, unit.uploadTurnIndex)),
     );
+    uploads.forEach((outcome, index) => {
+      const unit = units[index];
+      if (outcome.status === "fulfilled") unit.uploadedFileIds = outcome.value;
+      else unit.errorMessage = describeError(outcome.reason);
+    });
+
+    const developerUnit = units[0];
+    const developerFileIds = developerUnit.uploadedFileIds ?? [];
+
+    // A turn cannot be counted without the developer message it will carry.
+    const countUnits = [];
+    for (const unit of units) {
+      if (unit.errorMessage !== undefined) continue;
+      if (unit !== developerUnit && developerUnit.errorMessage !== undefined) {
+        unit.errorMessage = "developer context upload failed: " + developerUnit.errorMessage;
+        continue;
+      }
+      countUnits.push(unit);
+    }
+
+    // Every preview request goes out together; units are never serialized.
+    const previews = await Promise.allSettled(
+      countUnits.map((unit) =>
+        requestTokenPreview({
+          model: options.model,
+          promptText: unit.promptText,
+          developerPrompt: options.developerPrompt,
+          developerFileIds,
+          attachmentFileIds: unit === developerUnit ? [] : (unit.uploadedFileIds ?? []),
+          maxOutputTokens: options.maxOutputTokens,
+          reasoningEffort: options.reasoningEffort,
+          webSearch: options.webSearch,
+        }),
+      ),
+    );
+
+    const outcomes = new Map();
+    previews.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled") outcomes.set(countUnits[index], outcome.value);
+      else countUnits[index].errorMessage = describeError(outcome.reason);
+    });
+
+    let anyError = false;
+    const lines = units.map((unit) => {
+      if (unit.errorMessage !== undefined) {
+        anyError = true;
+        return unit.label + ": Error: " + unit.errorMessage;
+      }
+      const preview = outcomes.get(unit);
+      if (preview === undefined) {
+        anyError = true;
+        return unit.label + ": Error: token preview was not requested.";
+      }
+      if (preview.admission?.kind !== "admitted") anyError = true;
+      return unit.label + ": " + describeTokenPreview(preview);
+    });
+    renderTokenPreview(lines, anyError ? "error" : "ok");
   } catch (error) {
     setTokenPreview("Error: " + describeError(error), "error");
   } finally {

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   JUDGE_MAX_GRADE,
   JUDGE_OUTPUT_FIELD_NAMES,
+  buildJudgeInstruction,
   buildJudgeRequest,
   classifyJudgeEvaluation,
   deriveFileVisibility,
@@ -30,6 +31,7 @@ import {
   PROXY_JUDGE_API_ROOT,
   applicableFile,
   chatCompletionsChainedJudge,
+  chatCompletionsJudge,
   chatCompletionsPassthroughJudge,
   enabledJudgeConfig,
   inlineChainedJudge,
@@ -531,6 +533,58 @@ describe("judge audit records (item 15)", () => {
     expect(outcome.reason).toBe("artifact_guard_exceeded");
     expect(outcome.message).toContain("1500000");
     expect("request" in outcome).toBe(false);
+  });
+});
+
+describe("developer prompt composition", () => {
+  const developerPrompt = "Judge strictly as a reviewer.";
+  const generatedInstruction = buildJudgeInstruction({
+    turnIndex: BASE_BUILD_PARAMS.turnIndex,
+    expectedTagIndex: BASE_BUILD_PARAMS.turnIndex,
+    maxGrade: JUDGE_MAX_GRADE,
+  });
+  const composedInstruction = `${developerPrompt}\n\n${generatedInstruction}`;
+
+  it("prefixes the Responses developer message with the declared developer prompt", () => {
+    const built = expectBuilt(
+      build(openRouterJudge({ developerPrompt })),
+    );
+
+    const body = JSON.parse(built.requestBody) as Record<string, unknown>;
+    const input = body.input as Array<Record<string, unknown>>;
+    const developerMessage = input[0];
+    expect(developerMessage?.role).toBe("developer");
+    const developerContent = developerMessage?.content as Array<Record<string, unknown>>;
+    const developerText = developerContent[0]?.text as string;
+
+    expect(developerText.startsWith(developerPrompt)).toBe(true);
+    expect(developerText.startsWith(`${developerPrompt}\n\n`)).toBe(true);
+    expect(developerText).toBe(composedInstruction);
+    for (const fieldName of JUDGE_OUTPUT_FIELD_NAMES) {
+      expect(developerText).toContain(fieldName);
+    }
+
+    // Stateless Responses continuity is untouched by the developer prompt.
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  it("prefixes the Chat Completions developer message with the declared developer prompt", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge({ developerPrompt })),
+    );
+
+    const body = JSON.parse(built.requestBody) as Record<string, unknown>;
+    const messages = body.messages as Array<Record<string, unknown>>;
+    const developerMessage = messages[0];
+    expect(developerMessage?.role).toBe("developer");
+
+    const developerText = developerMessage?.content as string;
+    expect(developerText.startsWith(developerPrompt)).toBe(true);
+    expect(developerText.startsWith(`${developerPrompt}\n\n`)).toBe(true);
+    expect(developerText).toBe(composedInstruction);
+    for (const fieldName of JUDGE_OUTPUT_FIELD_NAMES) {
+      expect(developerText).toContain(fieldName);
+    }
   });
 });
 

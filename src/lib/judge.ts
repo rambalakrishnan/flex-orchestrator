@@ -322,11 +322,16 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
       ? reasoningContinuityPayload("stateful", continuityAnchor)
       : reasoningContinuityPayload("stateless", null);
 
-  const instruction = buildJudgeInstruction({
+  const generatedInstruction = buildJudgeInstruction({
     turnIndex: params.turnIndex,
     expectedTagIndex: params.turnIndex,
     maxGrade: Math.min(JUDGE_MAX_GRADE, Math.max(0, Math.trunc(config.maxGradeThreshold))),
   });
+  const trimmedDeveloperPrompt = config.developerPrompt.trim();
+  const instruction =
+    trimmedDeveloperPrompt.length > 0
+      ? `${trimmedDeveloperPrompt}\n\n${generatedInstruction}`
+      : generatedInstruction;
 
   const fileItems = buildJudgeFileContentItems({ config, files: toDeliver });
 

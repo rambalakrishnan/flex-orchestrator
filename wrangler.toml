@@ -38,3 +38,4 @@ required = [
 # Configure your judge model API keys in the Cloudflare Dashboard as well
 ]
 
+# EOF

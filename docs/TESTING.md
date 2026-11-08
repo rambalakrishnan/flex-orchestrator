@@ -341,6 +341,7 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] **Count Tokens** succeeds for each pending turn; with an invalid provider credential it shows a sanitized provider status/code and the **Health Check** probes report the failure without exposing the secret.
 - [ ] A job-scoped **Health Check** reports main and judge latency, OpenAI status, model-list count, and model presence.
 - [ ] JSONL export of a failed or incomplete job is parseable line-by-line, includes job/turn/attempt/judge-call summaries, and contains no request BLOBs or credentials.
+- [ ] **Inspect JSONL** reports per-type record counts and flags an `export_incomplete` marker.
 
 ### Exports
 - [ ] A completed job shows **Download Final Markdown**; the `.md` attachment concatenates accepted deliverables with `<!-- TURN_END:n -->` markers stripped.

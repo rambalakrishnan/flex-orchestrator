@@ -144,7 +144,7 @@ Generation uses Flex background Responses and never falls back to standard tier.
   - **Markdown:** accepted deliverables only, with the included turn range and status.
   - **Final Markdown:** `GET /api/jobs/:id/export/markdown` concatenates accepted deliverables with turn markers stripped; completed jobs show a **Download Final Markdown** button.
   - **JSON:** retained definitions, attempts, judge calls, usage, provenance, diagnostics, file IDs, and missing-artifact markers.
-  - **JSONL:** `GET /api/jobs/:id/export/jsonl` streams job, turn, attempt, and judge-call summaries as `application/x-ndjson` ordered by primary key. It omits request BLOBs, credentials, and encoded file bytes; it is available for incomplete jobs. If a page read fails after streaming starts, the final line is `{"type":"export_incomplete",...}` rather than a silently truncated file.
+  - **JSONL:** `GET /api/jobs/:id/export/jsonl` streams job, turn, attempt, and judge-call summaries as `application/x-ndjson` ordered by primary key. It omits request BLOBs, credentials, and encoded file bytes; it is available for incomplete jobs. If a page read fails after streaming starts, the final line is `{"type":"export_incomplete",...}` rather than a silently truncated file. The detail’s **Inspect JSONL** action parses the stream line-by-line and reports record counts and any incomplete marker.
   - JSON exports include encoded file bytes only when those bytes occur in a retained inline judge request. Exports do not fetch source files or attach a separate copy of their contents. Credentials are never exported.
   - A live JSON export is a versioned observation, not an atomic database backup.
 

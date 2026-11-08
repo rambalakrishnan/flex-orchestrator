@@ -67,6 +67,8 @@ const JOB_CONFIG: JobConfig = {
   maxContinuations: 3,
   maxAutoRetries: 1,
   judge: { enabled: false },
+  developerPrompt: "",
+  developerFileIds: [],
 };
 
 let sequence = 0;
@@ -226,6 +228,83 @@ describe("JobDO command surface", () => {
     const state = await stub.getState();
     if (state === null) throw new Error("expected job state");
     expect(state.job.title).toBe("first job");
+  });
+
+  it("round-trips developer context and enforces model capability limits", async () => {
+    const jobId = nextJobId();
+    const stub = stubFor(jobId);
+
+    const created = await stub.createJob({
+      jobId,
+      title: "developer context job",
+      config: {
+        ...JOB_CONFIG,
+        model: "gpt-6-astra",
+        reasoningEffort: "xhigh",
+        maxOutputTokens: 128_000,
+        developerPrompt: "shared context",
+        developerFileIds: [],
+      },
+      initialTurns: [],
+    });
+
+    expect(created.job.config.reasoningEffort).toBe("xhigh");
+    expect(created.job.config.developerPrompt).toBe("shared context");
+    expect(created.job.config.developerFileIds).toEqual([]);
+
+    const state = await stub.getState();
+    if (state === null) throw new Error("expected job state");
+    expect(state.job.config.developerPrompt).toBe("shared context");
+    expect(state.job.config.developerFileIds).toEqual([]);
+
+    const effortJobId = nextJobId();
+    trackJobId(effortJobId);
+    const unsupportedEffortMessage = await runInDurableObject(
+      env.JOB_DO.get(env.JOB_DO.idFromName(effortJobId)),
+      async (instance): Promise<string> => {
+        const jobDo = instance as unknown as JobDoTestStub;
+        try {
+          await jobDo.createJob({
+            jobId: effortJobId,
+            title: "unsupported effort",
+            config: { ...JOB_CONFIG, model: "gpt-5", reasoningEffort: "xhigh" },
+            initialTurns: [],
+          });
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }
+    );
+    expect(unsupportedEffortMessage).toContain("does not support reasoning effort");
+    expect(unsupportedEffortMessage).toContain("xhigh");
+
+    const outputJobId = nextJobId();
+    trackJobId(outputJobId);
+    const oversizedOutputMessage = await runInDurableObject(
+      env.JOB_DO.get(env.JOB_DO.idFromName(outputJobId)),
+      async (instance): Promise<string> => {
+        const jobDo = instance as unknown as JobDoTestStub;
+        try {
+          await jobDo.createJob({
+            jobId: outputJobId,
+            title: "oversized output budget",
+            config: {
+              ...JOB_CONFIG,
+              model: "gpt-6-astra",
+              reasoningEffort: "xhigh",
+              maxOutputTokens: 128_001,
+            },
+            initialTurns: [],
+          });
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }
+    );
+    expect(oversizedOutputMessage).toContain("maxOutputTokens 128001");
+    expect(oversizedOutputMessage).toContain("gpt-6-astra");
   });
 
   it("cancels through an operator decision and exposes BLOB-free pages", async () => {

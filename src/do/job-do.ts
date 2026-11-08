@@ -325,7 +325,14 @@ function uniqueStrings(values: readonly string[]): string[] {
 }
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === "low" || value === "medium" || value === "high";
+  return (
+    value === "none" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+  );
 }
 
 function isJudgeTransport(value: unknown): value is JudgeTransport {
@@ -366,6 +373,9 @@ function parseJudgeConfig(raw: string): JudgeConfig {
   if (parsed.enabled !== true) {
     throw new Error("jobs.judge_config_json enabled flag must be boolean");
   }
+  if (parsed.developerPrompt !== undefined && typeof parsed.developerPrompt !== "string") {
+    throw new Error("jobs.judge_config_json developerPrompt must be a string");
+  }
   if (
     typeof parsed.provider !== "string" ||
     typeof parsed.apiRoot !== "string" ||
@@ -390,6 +400,8 @@ function parseJudgeConfig(raw: string): JudgeConfig {
     fileDeliveryMode: parsed.fileDeliveryMode,
     includePrior: parsed.includePrior,
     maxGradeThreshold: parsed.maxGradeThreshold,
+    developerPrompt:
+      typeof parsed.developerPrompt === "string" ? parsed.developerPrompt : "",
   };
 }
 
@@ -403,6 +415,10 @@ function jobConfigFromRow(row: JobRow): JobConfig {
     maxOutputTokens: row.max_output_tokens,
     cacheTtl: row.cache_ttl,
     webSearch: row.web_search === 1,
+    developerPrompt: row.developer_prompt,
+    developerFileIds: uniqueStrings(
+      readStringArray(row.developer_file_ids_json).filter((id) => id.length > 0)
+    ),
     maxContinuations: row.continuation_budget,
     maxAutoRetries: row.auto_retry_budget,
     judge: parseJudgeConfig(row.judge_config_json),
@@ -865,6 +881,10 @@ export class JobDO extends DurableObject<Env> {
           cache_ttl: command.config.cacheTtl,
           web_search: command.config.webSearch ? 1 : 0,
           judge_config_json: JSON.stringify(command.config.judge),
+          developer_prompt: command.config.developerPrompt,
+          developer_file_ids_json: JSON.stringify(
+            uniqueStrings(command.config.developerFileIds)
+          ),
           continuation_budget: command.config.maxContinuations,
           continuations_used: 0,
           auto_retry_budget: command.config.maxAutoRetries,
@@ -898,7 +918,10 @@ export class JobDO extends DurableObject<Env> {
       });
     }
 
-    const fileIds = this.collectCommandFileIds(command);
+    const fileIds = uniqueStrings([
+      ...this.collectCommandFileIds(command),
+      ...command.config.developerFileIds,
+    ]);
     if (fileIds.length > 0) {
       await this.registryStub().protectJobFileRefs(command.jobId, fileIds);
     }
@@ -1050,7 +1073,7 @@ export class JobDO extends DurableObject<Env> {
     const lineage =
       job.parent_job_id === null ? null : getBranchLineage(this.sql, job.job_id);
     const parentJob = jobRowToRecord(job, lineage);
-    const referencedFileIds: FileId[] = [];
+    const referencedFileIds: FileId[] = [...readStringArray(job.developer_file_ids_json)];
     const turns: BranchTurnSnapshot[] = [];
 
     this.storage.transactionSync(() => {
@@ -1220,6 +1243,10 @@ export class JobDO extends DurableObject<Env> {
         cache_ttl: snapshot.parentJob.config.cacheTtl,
         web_search: snapshot.parentJob.config.webSearch ? 1 : 0,
         judge_config_json: JSON.stringify(snapshot.parentJob.config.judge),
+        developer_prompt: snapshot.parentJob.config.developerPrompt,
+        developer_file_ids_json: JSON.stringify(
+          uniqueStrings(snapshot.parentJob.config.developerFileIds)
+        ),
         continuation_budget: snapshot.parentJob.config.maxContinuations,
         continuations_used: 0,
         auto_retry_budget: snapshot.parentJob.config.maxAutoRetries,
@@ -1690,17 +1717,41 @@ export class JobDO extends DurableObject<Env> {
       throw new Error("CreateJobCommand.title must be a string");
     }
     const config = command.config;
-    if (getVerifiedGenerationModel(config.model) === undefined) {
+    const profile = getVerifiedGenerationModel(config.model);
+    if (profile === undefined) {
       throw new Error(`Unknown generation model: ${config.model}`);
     }
     if (!isReasoningEffort(config.reasoningEffort)) {
       throw new Error(`Unsupported reasoning effort: ${String(config.reasoningEffort)}`);
+    }
+    if (!profile.supportedReasoningEfforts.includes(config.reasoningEffort)) {
+      throw new Error(
+        `Model ${profile.id} does not support reasoning effort ${config.reasoningEffort}; supported efforts: ${profile.supportedReasoningEfforts.join(", ")}`
+      );
     }
     if (
       !Number.isInteger(config.maxOutputTokens) ||
       config.maxOutputTokens <= 0
     ) {
       throw new Error("CreateJobCommand.config.maxOutputTokens must be a positive integer");
+    }
+    if (config.maxOutputTokens > profile.maxOutputTokens) {
+      throw new Error(
+        `CreateJobCommand.config.maxOutputTokens ${config.maxOutputTokens} exceeds the ${profile.id} limit of ${profile.maxOutputTokens}`
+      );
+    }
+    if (typeof config.developerPrompt !== "string") {
+      throw new Error("CreateJobCommand.config.developerPrompt must be a string");
+    }
+    if (!Array.isArray(config.developerFileIds)) {
+      throw new Error("CreateJobCommand.config.developerFileIds must be an array");
+    }
+    for (const fileId of config.developerFileIds) {
+      if (typeof fileId !== "string" || fileId.length === 0) {
+        throw new Error(
+          "CreateJobCommand.config.developerFileIds must contain only non-empty strings"
+        );
+      }
     }
     if (
       config.cacheTtl !== "30m" &&
@@ -2150,6 +2201,8 @@ export class JobDO extends DurableObject<Env> {
       attemptKind: kind,
       promptText,
       attachmentFileIds,
+      developerPrompt: jobConfig.developerPrompt,
+      developerFileIds: jobConfig.developerFileIds,
       previousResponseId: anchor,
       priorAcceptedTurns: anchor === null ? priorAcceptedTurns : undefined,
     });

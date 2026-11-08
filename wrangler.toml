@@ -34,4 +34,5 @@ JUDGE_DEFAULT_MODEL = "muse-spark-1.3-contributor"
 required = [
   "HOOKS_HOST",
   "OPENAI_WEBHOOK_SECRET"
+  "OPENAI_API_KEY"
 ]

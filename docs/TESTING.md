@@ -163,7 +163,7 @@ Cover: `src/lib/markdown.ts`, `src/views/jobs.ts`, `src/handlers/jobs.ts`, `src/
 Cover: `src/db/schema.ts`, `test/db/migrations.test.ts`, `test/db/schema.test.ts`.
 
 ### Generation
-**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, legacy `24h`, `nocache`, places developer messages in `input` (not `instructions`), and uses exact canonical-request counting.
+**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, `nocache`, places developer messages in `input` (not `instructions`), and uses exact canonical-request counting.
 
 Long-context classification test points, using mocked counts:
 - **271,999** → not long-context

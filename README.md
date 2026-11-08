@@ -118,7 +118,7 @@ The Worker treats `HOOKS_HOST` as the public webhook ingress and every other rea
 1. Click **New Job**.
 2. Select a verified generation model. Unknown models receive no guessed limits or fallback profile.
 3. Set generation controls: reasoning effort, maximum output tokens, cache selection, and optional web search.
-   - Cache selection is explicit among `30m`, `12h`, legacy `24h`, and `nocache`.
+   - Cache selection is explicit among `30m`, `12h`, and `nocache`. The retired `24h` retention option is not accepted; legacy persisted rows are read as `12h`.
 4. Upload attachments. Client-submitted generation attachments use Files API uploads and returned `file_id` references.
 5. Declare the judge’s transport, history mode, file-delivery mode, and model; or disable the judge.
 6. Start the job.
@@ -217,5 +217,5 @@ Accept-with-warning uses the ordinary acceptance transition and preserves the or
 | Webhook timestamp tolerance | 300 seconds |
 | Browser polling | Every 12 seconds while work is active |
 | Long-context classification | Full request input above 272,000 tokens, including cached input |
-| Cache choices | Explicit among `30m`, `12h`, legacy `24h`, and `nocache` |
+| Cache choices | Explicit among `30m`, `12h`, and `nocache` (retired `24h` rows read as `12h`) |
 | Usage accounting | Recorded once per call; missing usage and unknown pricing remain explicit |

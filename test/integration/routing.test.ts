@@ -23,6 +23,8 @@ function createJobCommand(jobId: string, title = "Routing smoke job"): Record<st
       maxContinuations: 3,
       maxAutoRetries: 1,
       judge: { enabled: false },
+      developerPrompt: "",
+      developerFileIds: [],
     },
     initialTurns: [
       { turnIndex: 1, promptText: "Write the first section.", attachmentFileIds: [] },
@@ -62,11 +64,53 @@ describe("server-rendered fragments", () => {
     const html = await response.text();
     expect(html).toContain("Routing smoke job");
     expect(html).toContain(jobId);
+    expect(html).toContain("Turns");
+    expect(html).toContain("Attempts");
+    expect(html).toContain("Judge calls");
 
     const missing = await mainWorker.fetch(
       `https://${APP_HOST}/api/jobs/job_missing_fragment/fragment`,
     );
     expect(missing.status).toBe(404);
+  });
+
+  it("accepts a GPT-6 Astra job with developer context and high reasoning", async () => {
+    const jobId = `job_astra_${Date.now()}`;
+    const created = await mainWorker.fetch(`https://${APP_HOST}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: APP_ORIGIN },
+      body: JSON.stringify({
+        jobId,
+        title: "Routing smoke job",
+        config: {
+          model: "gpt-6-astra",
+          reasoningEffort: "xhigh",
+          maxOutputTokens: 128_000,
+          cacheTtl: "12h",
+          webSearch: false,
+          maxContinuations: 3,
+          maxAutoRetries: 1,
+          developerPrompt: "Shared developer context.",
+          developerFileIds: [],
+          judge: { enabled: false },
+        },
+        initialTurns: [
+          { turnIndex: 1, promptText: "Write the first section.", attachmentFileIds: [] },
+        ],
+      }),
+    });
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as {
+      job: { config: { model: string; reasoningEffort: string; developerPrompt: string } };
+    };
+    expect(body.job.config).toMatchObject({
+      model: "gpt-6-astra",
+      reasoningEffort: "xhigh",
+      developerPrompt: "Shared developer context.",
+    });
+
+    const list = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/fragment`);
+    expect(await list.text()).toContain("gpt-6-astra");
   });
 
   it("escapes untrusted job metadata in the server-rendered fragment", async () => {

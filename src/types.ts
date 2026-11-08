@@ -49,7 +49,7 @@ export type BinaryPayload = ArrayBuffer | Uint8Array;
 export type CacheTtl = "30m" | "12h" | "24h" | "nocache";
 
 /** OpenAI Responses reasoning effort levels. */
-export type ReasoningEffort = "low" | "medium" | "high";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Service tier for generation requests (always "flex" in background mode). */
 export type ServiceTier = "flex";
@@ -113,6 +113,11 @@ export type JudgeConfig =
       readonly fileDeliveryMode: JudgeFileDeliveryMode;
       readonly includePrior: boolean;
       readonly maxGradeThreshold: number;
+      /**
+       * Developer context delivered to the judge as a developer-role message.
+       * Judge developer files are attached to that same developer message on every judge call.
+       */
+      readonly developerPrompt: string;
     };
 
 export type JudgeVerdict = "PASS" | "FAIL";
@@ -268,6 +273,13 @@ export interface JobConfig {
   readonly maxOutputTokens: number;
   readonly cacheTtl: CacheTtl;
   readonly webSearch: boolean;
+  /**
+   * Developer context delivered as a developer-role message. The developer
+   * files are attached to that same developer message on every generation attempt.
+   */
+  readonly developerPrompt: string;
+  /** Developer files attached to the developer-role message on every generation attempt. */
+  readonly developerFileIds: readonly FileId[];
   readonly maxContinuations: number;
   readonly maxAutoRetries: number;
   readonly judge: JudgeConfig;
@@ -433,6 +445,10 @@ export interface MarginalTokenPreviewRequest {
   readonly maxOutputTokens: number;
   readonly reasoningEffort: ReasoningEffort;
   readonly webSearch: boolean;
+  /** Developer context counted as a developer-role message in the preview request. */
+  readonly developerPrompt?: string;
+  /** Developer files attached to the developer-role message in the preview request. */
+  readonly developerFileIds?: readonly FileId[];
 }
 
 export interface MarginalTokenPreviewResponse {

@@ -237,7 +237,14 @@ export const CACHE_TTL_CHOICES = ["30m", "12h", "24h", "nocache"] as const;
 export type CacheTtlChoice = (typeof CACHE_TTL_CHOICES)[number];
 
 /** Supported reasoning effort levels for generation models. */
-export const REASONING_EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+export const REASONING_EFFORT_LEVELS = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 export type ReasoningEffortLevel = (typeof REASONING_EFFORT_LEVELS)[number];
 
 /** OpenAI webhook event types subscribed to and handled by RouterDO. */
@@ -447,6 +454,106 @@ export const VERIFIED_GENERATION_MODELS: Readonly<
       outputUsdPerMillion: 2.2,
     },
     longContextPricing: null,
+  },
+  "gpt-6-astra": {
+    id: "gpt-6-astra",
+    displayName: "GPT-6 Astra",
+    contextWindowTokens: 1_050_000,
+    maxInputTokens: 922_000,
+    maxOutputTokens: 128_000,
+    defaultMaxOutputTokens: 128_000,
+    longContextThresholdTokens: LONG_CONTEXT_INPUT_TOKENS_THRESHOLD,
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultReasoningEffort: "medium",
+    supportsFlexBackground: true,
+    supportsWebSearch: true,
+    supportsStatefulContinuity: true,
+    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    standardPricing: {
+      inputUsdPerMillion: 10.0,
+      cachedInputUsdPerMillion: 1.0,
+      outputUsdPerMillion: 50.0,
+    },
+    longContextPricing: {
+      inputUsdPerMillion: 20.0,
+      cachedInputUsdPerMillion: 2.0,
+      outputUsdPerMillion: 75.0,
+    },
+  },
+  "gpt-6.1-sol": {
+    id: "gpt-6.1-sol",
+    displayName: "GPT-6.1 Sol",
+    contextWindowTokens: 1_050_000,
+    maxInputTokens: 922_000,
+    maxOutputTokens: 128_000,
+    defaultMaxOutputTokens: 128_000,
+    longContextThresholdTokens: LONG_CONTEXT_INPUT_TOKENS_THRESHOLD,
+    supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    defaultReasoningEffort: "medium",
+    supportsFlexBackground: true,
+    supportsWebSearch: true,
+    supportsStatefulContinuity: true,
+    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    standardPricing: {
+      inputUsdPerMillion: 2.0,
+      cachedInputUsdPerMillion: 0.1,
+      outputUsdPerMillion: 10.0,
+    },
+    longContextPricing: {
+      inputUsdPerMillion: 4.0,
+      cachedInputUsdPerMillion: 0.2,
+      outputUsdPerMillion: 15.0,
+    },
+  },
+  "gpt-6.1-terra": {
+    id: "gpt-6.1-terra",
+    displayName: "GPT-6.1 Terra",
+    contextWindowTokens: 1_050_000,
+    maxInputTokens: 922_000,
+    maxOutputTokens: 128_000,
+    defaultMaxOutputTokens: 128_000,
+    longContextThresholdTokens: LONG_CONTEXT_INPUT_TOKENS_THRESHOLD,
+    supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    defaultReasoningEffort: "medium",
+    supportsFlexBackground: true,
+    supportsWebSearch: true,
+    supportsStatefulContinuity: true,
+    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    standardPricing: {
+      inputUsdPerMillion: 1.0,
+      cachedInputUsdPerMillion: 0.05,
+      outputUsdPerMillion: 5.0,
+    },
+    longContextPricing: {
+      inputUsdPerMillion: 2.0,
+      cachedInputUsdPerMillion: 0.1,
+      outputUsdPerMillion: 7.5,
+    },
+  },
+  "gpt-6-luna": {
+    id: "gpt-6-luna",
+    displayName: "GPT-6 Luna",
+    contextWindowTokens: 1_050_000,
+    maxInputTokens: 922_000,
+    maxOutputTokens: 128_000,
+    defaultMaxOutputTokens: 128_000,
+    longContextThresholdTokens: LONG_CONTEXT_INPUT_TOKENS_THRESHOLD,
+    supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    defaultReasoningEffort: "medium",
+    supportsFlexBackground: true,
+    supportsWebSearch: true,
+    supportsStatefulContinuity: true,
+    supportedCacheTtls: ["30m", "12h", "24h", "nocache"],
+    standardPricing: {
+      inputUsdPerMillion: 0.1,
+      cachedInputUsdPerMillion: 0.01,
+      outputUsdPerMillion: 0.5,
+    },
+    longContextPricing: {
+      inputUsdPerMillion: 0.2,
+      cachedInputUsdPerMillion: 0.02,
+      outputUsdPerMillion: 0.75,
+    },
   },
 } as const;
 

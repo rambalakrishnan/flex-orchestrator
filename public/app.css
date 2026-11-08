@@ -522,6 +522,19 @@ button[type="submit"]:hover:not(:disabled),
   letter-spacing: 0.01em;
 }
 
+/* Judge provider base URL (with datalist suggestions) */
+#judge-base-url {
+  padding-right: 2rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.01em;
+}
+
+#judge-panel > p:has(#judge-base-url),
+#judge-details p:has(#judge-base-url) {
+  grid-column: 1 / -1;
+}
+
 /* Textarea sizing per section */
 #developer-prompt {
   min-height: 5.75rem;
@@ -658,6 +671,69 @@ input[type="file"]:hover::file-selector-button {
   border-color: color-mix(in srgb, var(--danger) 34%, transparent);
 }
 
+/* Grouped header actions keep Count and Remove aligned. */
+.turn-block-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+/* Small secondary action inside a turn header. */
+.turn-count {
+  justify-self: start;
+  padding: 0.3rem 0.72rem;
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-sm), var(--inset-highlight);
+}
+
+.turn-count:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Inline token-count status for one turn. */
+.turn-token-result {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 1.15em;
+  padding: 0.55rem 0.75rem;
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(8, 10, 16, 0.5);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.turn-token-result:empty,
+.turn-token-result[hidden] {
+  display: none;
+}
+
+.turn-token-result[data-state="ok"] {
+  color: color-mix(in srgb, var(--success) 78%, var(--text));
+  background: color-mix(in srgb, var(--success) 8%, rgba(8, 10, 16, 0.5));
+  border-left-color: var(--success);
+}
+
+.turn-token-result[data-state="error"] {
+  color: color-mix(in srgb, var(--danger) 82%, var(--text));
+  background: color-mix(in srgb, var(--danger) 10%, rgba(8, 10, 16, 0.5));
+  border-left-color: var(--danger);
+}
+
 #add-turn {
   grid-column: 1 / -1;
   justify-self: start;
@@ -718,6 +794,218 @@ input[type="file"]:hover::file-selector-button {
 
 #judge-grade {
   max-width: 10rem;
+}
+
+/* Collapsible judge settings surface. */
+#judge-details {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012)),
+    rgba(20, 24, 35, 0.42);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm), var(--inset-highlight);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+  overflow: hidden;
+}
+
+#create-job-form fieldset > #judge-details,
+#judge-panel > #judge-details,
+#judge-details > #judge-panel,
+#judge-details > .judge-details-body {
+  grid-column: 1 / -1;
+}
+
+#judge-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.8rem var(--card-pad);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: transform var(--speed) var(--ease), opacity var(--speed) var(--ease);
+}
+
+#judge-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+#judge-details > summary::marker {
+  content: "";
+}
+
+/* Keep the focus ring visible inside the rounded glass shell. */
+#judge-details > summary:focus-visible {
+  outline-offset: -3px;
+}
+
+/* Chevron: right-pointing when closed, down when open. */
+#judge-details > summary::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-inline: 0.15rem 0.05rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--speed) var(--ease);
+}
+
+#judge-details[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+#judge-details > summary:hover {
+  color: var(--text);
+}
+
+#judge-details[open] > summary {
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The disclosure already supplies the glass chrome. */
+#judge-details > #judge-panel {
+  padding: var(--card-pad);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+#judge-details > .judge-details-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--gap);
+  align-items: start;
+  min-width: 0;
+  padding: var(--card-pad);
+}
+
+/* Field rows when the disclosure body holds them directly. */
+#judge-details > .judge-details-body > p:not(.radio-group) {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  margin: 0;
+}
+
+#judge-details > .judge-details-body > p:has(textarea),
+#judge-details > .judge-details-body > p:has(input[type="radio"]),
+#judge-details > .judge-details-body > p:has(input[type="file"]),
+#judge-details > .judge-details-body > .judge-toggles {
+  grid-column: 1 / -1;
+}
+
+#judge-details > .judge-details-body > .radio-group {
+  grid-column: 1 / -1;
+}
+
+#judge-details[open] > :not(summary) {
+  margin-top: 0;
+}
+
+/* Judge toggles — switch-like rows. */
+.judge-toggles {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+:is(#judge-panel, #judge-details) p:has(input[type="checkbox"]),
+:is(#judge-panel, #judge-details) :is(.judge-toggle, .toggle-row):has(input[type="checkbox"]),
+:is(#judge-panel, #judge-details) > label:has(> input[type="checkbox"]),
+#judge-details > .judge-details-body > label:has(> input[type="checkbox"]),
+.judge-toggles > label:has(> input[type="checkbox"]),
+.judge-toggles > :is(.judge-toggle, .toggle-row):has(input[type="checkbox"]) {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.7rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0;
+  background: rgba(8, 10, 16, 0.32);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+:is(#judge-panel, #judge-details) p:has(input[type="checkbox"]) label,
+:is(#judge-panel, #judge-details) :is(.judge-toggle, .toggle-row) label {
+  order: 1;
+  cursor: pointer;
+}
+
+:is(#judge-panel, #judge-details) :is(.judge-toggle, .toggle-row):has(input:checked),
+.judge-toggles > :has(input:checked) {
+  background: color-mix(in srgb, var(--accent) 7%, rgba(8, 10, 16, 0.32));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+:is(#judge-panel, #judge-details) :is(.judge-toggle, .toggle-row) :is(.hint, small),
+.judge-toggles :is(.hint, small) {
+  flex-basis: 100%;
+}
+
+/* Checkbox rendered as a switch track. The gradient thumb renders where
+   input pseudo-elements are unsupported; the pseudo-element thumb otherwise
+   supplies a transform-animated glide. */
+:is(#judge-panel, #judge-details) input[type="checkbox"] {
+  position: relative;
+  flex: 0 0 auto;
+  width: 2.35rem;
+  height: 1.3rem;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: rgba(255, 255, 255, 0.07);
+  background-image: radial-gradient(circle, var(--muted) 0 0.43rem, transparent 0.44rem);
+  background-repeat: no-repeat;
+  background-position: left 0.16rem center;
+  background-size: 0.86rem 0.86rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+}
+
+:is(#judge-panel, #judge-details) input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.16rem;
+  width: 0.86rem;
+  height: 0.86rem;
+  background: var(--muted);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  transform: translateY(-50%);
+  transition: transform var(--speed) var(--ease);
+}
+
+:is(#judge-panel, #judge-details) input[type="checkbox"]:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+}
+
+:is(#judge-panel, #judge-details) input[type="checkbox"]:checked {
+  background-color: var(--accent-soft);
+  background-image: radial-gradient(circle, var(--accent-strong) 0 0.43rem, transparent 0.44rem);
+  background-position: right 0.16rem center;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+:is(#judge-panel, #judge-details) input[type="checkbox"]:checked::after {
+  background: var(--accent-strong);
+  transform: translate(1.2rem, -50%);
 }
 
 /* Radio groups */
@@ -1107,6 +1395,102 @@ em[class*="status-"] {
   letter-spacing: -0.01em;
   text-transform: none;
   color: var(--text);
+}
+
+/* Inline judge verdict for one deliverable. */
+.turn-judge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  min-width: 0;
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  border-top: 1px dashed var(--border);
+}
+
+.turn-judge .status {
+  padding: 0.12rem 0.5rem;
+  font-size: 0.68rem;
+}
+
+.turn-judge :is(.judge-grade, .turn-judge-grade) {
+  padding: 0.1rem 0.45rem;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.turn-judge :is(.judge-verdict, .judge-tag-agreement, .judge-file-visibility) {
+  white-space: nowrap;
+}
+
+.turn-judge .judge-comment,
+.turn-judge :is(p, blockquote) {
+  flex: 1 0 100%;
+  max-width: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Beat the later `.deliverable p` typography rule. */
+.deliverable .turn-judge :is(p, blockquote) {
+  margin: 0;
+}
+
+/* Primary link-style button for the accepted final deliverable. */
+.download-final,
+.deliverable a.download-final,
+.deliverable-header a.download-final,
+.job-detail a.download-final {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  padding: 0.45rem 1rem;
+  color: var(--accent-contrast);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  text-decoration: none;
+  background: linear-gradient(180deg, var(--accent-strong), var(--accent));
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-md), 0 0 0 1px rgba(138, 164, 255, 0.35);
+  transition: transform var(--speed) var(--ease), opacity var(--speed) var(--ease);
+}
+
+.download-final:hover,
+.deliverable a.download-final:hover,
+.deliverable-header a.download-final:hover,
+.job-detail a.download-final:hover {
+  color: var(--accent-contrast);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.download-final:active,
+.deliverable a.download-final:active,
+.deliverable-header a.download-final:active,
+.job-detail a.download-final:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.download-final[hidden] {
+  display: none;
 }
 
 .deliverable-content {
@@ -1788,6 +2172,27 @@ dialog,
     max-width: 100%;
   }
 
+  #judge-details > summary {
+    padding: 0.7rem 0.9rem;
+  }
+
+  #judge-details > #judge-panel,
+  #judge-details > .judge-details-body {
+    padding: 0.9rem;
+  }
+
+  .turn-block-actions {
+    margin-left: 0;
+  }
+
+  .turn-judge {
+    gap: 0.3rem 0.5rem;
+  }
+
+  .download-final {
+    width: 100%;
+  }
+
   .table-wrap {
     border-radius: var(--radius-sm);
   }
@@ -1834,7 +2239,9 @@ dialog,
   button:hover:not(:disabled),
   button:active:not(:disabled),
   .btn:hover:not(:disabled),
-  .btn:active:not(:disabled) {
+  .btn:active:not(:disabled),
+  .download-final:hover,
+  .download-final:active {
     transform: none;
   }
 
@@ -1854,6 +2261,7 @@ dialog,
   body > section,
   .job-card,
   .job-detail,
+  #judge-details,
   dialog,
   #job-dialog,
   #job-dialog::backdrop {
@@ -1863,6 +2271,7 @@ dialog,
 
   #create-job-form > fieldset,
   #judge-panel,
+  #judge-details,
   .turn-block,
   .table-wrap {
     background: var(--surface-strong);
@@ -1882,6 +2291,7 @@ dialog,
   .deliverable,
   #create-job-form > fieldset,
   #judge-panel,
+  #judge-details,
   .turn-block,
   .table-wrap {
     border-width: 2px;

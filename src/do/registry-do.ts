@@ -59,7 +59,7 @@ import type {
 // ============================================================================
 
 const JOB_INDEX_COLUMNS =
-  "job_id, title, status, model, parent_job_id, is_terminal, revision, created_at, updated_at";
+  "job_id, title, status, model, parent_job_id, is_terminal, revision, current_turn_index, accepted_turn_count, created_at, updated_at";
 
 const FILE_CATALOGUE_COLUMNS =
   "file_id, sha256, filename, mime_type, byte_size, purpose, status, active_job_refs, retention_eligible_at_ms, created_at_ms, deleted_at_ms, created_at, updated_at";
@@ -270,14 +270,28 @@ function toFileUploadIntentRecord(row: UploadIntentRow): FileUploadIntentRecord 
  * known total cost). Lifecycle transitions change only status, terminality, and
  * revision through `updateJobIndexStatus`.
  */
+function requireTurnIndex(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < TURN_INDEX_MIN) {
+    throw new RangeError(`${label} must be an integer >= ${TURN_INDEX_MIN}`);
+  }
+  return value;
+}
+
+function requireAcceptedTurnCount(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("acceptedTurnCount must be a non-negative safe integer");
+  }
+  return value;
+}
+
 function toJobSummaryItem(row: JobIndexRow): JobSummaryItem {
   return {
     jobId: row.job_id,
     title: row.title,
     status: row.status,
     model: row.model,
-    currentTurnIndex: TURN_INDEX_MIN,
-    acceptedTurnCount: 0,
+    currentTurnIndex: row.current_turn_index,
+    acceptedTurnCount: row.accepted_turn_count,
     totalEstimatedCostUsd: null,
     createdAtMs: epochMsFromIso(row.created_at, "job_index.created_at"),
     updatedAtMs: epochMsFromIso(row.updated_at, "job_index.updated_at"),
@@ -541,14 +555,17 @@ export class RegistryDO extends DurableObject<Env> {
       assertRegistryRowSize([jobId, title, model], "job_index.row_bytes");
       storage.sql.exec(
         `INSERT INTO job_index (
-           job_id, title, status, model, parent_job_id, is_terminal, revision, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)
+           job_id, title, status, model, parent_job_id, is_terminal, revision,
+           current_turn_index, accepted_turn_count, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?)
          ON CONFLICT(job_id) DO NOTHING`,
         jobId,
         title,
         summary.status,
         model,
         TERMINAL_JOB_STATUS[summary.status] ? 1 : 0,
+        requireTurnIndex(summary.currentTurnIndex, "currentTurnIndex"),
+        requireAcceptedTurnCount(summary.acceptedTurnCount),
         isoFromMs(createdAtMs),
         isoFromMs(updatedAtMs),
       );
@@ -560,12 +577,20 @@ export class RegistryDO extends DurableObject<Env> {
    * the stored row is ignored rather than overwriting a newer status; only
    * status, terminality, revision, and `updated_at` change.
    */
-  async updateJobIndexStatus(jobId: JobId, status: JobStatus, revision: number): Promise<void> {
+  async updateJobIndexStatus(
+    jobId: JobId,
+    status: JobStatus,
+    revision: number,
+    currentTurnIndex: number,
+    acceptedTurnCount: number,
+  ): Promise<void> {
     const storage = this.ctx.storage as unknown as SchemaTransactionalStorage;
     const indexJobId = requireNonEmptyIdentifier(jobId, "jobId");
     if (!Number.isSafeInteger(revision) || revision < 1) {
       throw new RangeError("revision must be a positive safe integer");
     }
+    const turnIndex = requireTurnIndex(currentTurnIndex, "currentTurnIndex");
+    const acceptedTurns = requireAcceptedTurnCount(acceptedTurnCount);
 
     withSqlErrorMapping(() => {
       storage.transactionSync(() => {
@@ -581,11 +606,14 @@ export class RegistryDO extends DurableObject<Env> {
         }
         sql.exec(
           `UPDATE job_index
-           SET status = ?, is_terminal = ?, revision = ?, updated_at = ?
+           SET status = ?, is_terminal = ?, revision = ?,
+               current_turn_index = ?, accepted_turn_count = ?, updated_at = ?
            WHERE job_id = ?`,
           status,
           TERMINAL_JOB_STATUS[status] ? 1 : 0,
           revision,
+          turnIndex,
+          acceptedTurns,
           isoFromMs(now()),
           indexJobId,
         );

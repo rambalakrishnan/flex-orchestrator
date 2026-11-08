@@ -386,14 +386,17 @@ describe("schema DDL validation", () => {
 
         storage.sql.exec(
           `INSERT INTO job_index (
-            job_id, title, status, model, parent_job_id, is_terminal, revision, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            job_id, title, status, model, parent_job_id, is_terminal, revision,
+            current_turn_index, accepted_turn_count, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           "job_001",
           "Spec Generation Job",
           "running",
           "gpt-5",
           null,
           0,
+          1,
+          2,
           1,
           NOW_ISO,
           NOW_ISO

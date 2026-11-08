@@ -43,6 +43,8 @@ interface IndexRow extends Record<string, SqlStorageValue> {
   status: string;
   is_terminal: number;
   revision: number;
+  current_turn_index: number;
+  accepted_turn_count: number;
 }
 
 interface CatalogueRow extends Record<string, SqlStorageValue> {
@@ -59,7 +61,7 @@ interface IntentRow extends Record<string, SqlStorageValue> {
 function indexRow(state: DurableObjectState, jobId: string): IndexRow {
   return state.storage.sql
     .exec<IndexRow>(
-      "SELECT status, is_terminal, revision FROM job_index WHERE job_id = ?",
+      "SELECT status, is_terminal, revision, current_turn_index, accepted_turn_count FROM job_index WHERE job_id = ?",
       jobId,
     )
     .one();
@@ -96,18 +98,27 @@ describe("RegistryDO job index", () => {
       expect(second.hasMore).toBe(false);
       expect(second.nextCursor).toBeNull();
 
-      await registry.updateJobIndexStatus("job-a", "completed", 3);
+      await registry.updateJobIndexStatus("job-a", "completed", 3, 4, 2);
+      expect(indexRow(state, "job-a")).toMatchObject({
+        status: "completed",
+        is_terminal: 1,
+        revision: 3,
+        current_turn_index: 4,
+        accepted_turn_count: 2,
+      });
+
+      await registry.updateJobIndexStatus("job-a", "running", 2, 9, 9);
       expect(indexRow(state, "job-a")).toMatchObject({
         status: "completed",
         is_terminal: 1,
         revision: 3,
       });
 
-      await registry.updateJobIndexStatus("job-a", "running", 2);
-      expect(indexRow(state, "job-a")).toMatchObject({
-        status: "completed",
-        is_terminal: 1,
-        revision: 3,
+      const updatedPage = await registry.listJobs({ limit: 10 });
+      const updated = updatedPage.items.find((item) => item.jobId === "job-a");
+      expect(updated).toMatchObject({
+        currentTurnIndex: 4,
+        acceptedTurnCount: 2,
       });
 
       // Repeated registration never resets an advanced revision or status.

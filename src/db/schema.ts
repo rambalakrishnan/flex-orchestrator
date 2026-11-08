@@ -622,6 +622,8 @@ CREATE TABLE IF NOT EXISTS job_index (
   parent_job_id TEXT,
   is_terminal INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0, 1)),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  current_turn_index INTEGER NOT NULL DEFAULT ${TURN_INDEX_MIN} CHECK (current_turn_index >= ${TURN_INDEX_MIN}),
+  accepted_turn_count INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turn_count >= 0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (length(job_id) + length(title) + length(model) <= ${ARTIFACT_ROW_GUARD_BYTES})
@@ -992,6 +994,8 @@ export interface JobIndexRow extends Record<string, SqlPrimitiveValue> {
   parent_job_id: string | null;
   is_terminal: number;
   revision: number;
+  current_turn_index: number;
+  accepted_turn_count: number;
   created_at: string;
   updated_at: string;
 }

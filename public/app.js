@@ -6,38 +6,20 @@ const dialog = document.getElementById("job-dialog");
 const dialogBody = document.getElementById("job-dialog-body");
 const turnsContainer = document.getElementById("turns");
 const turnTemplate = document.getElementById("turn-template");
-const countTokensButton = document.getElementById("count-tokens");
-const tokenPreview = document.getElementById("token-preview");
 const developerFilesInput = document.getElementById("developer-files");
 const judgeEnabledCheckbox = document.getElementById("judge-enabled");
 const judgePanel = document.getElementById("judge-panel");
+const judgeInjectFailCheckbox = document.getElementById("judge-inject-fail");
+const judgeInjectPassCheckbox = document.getElementById("judge-inject-pass");
 
-const OPENROUTER_API_ROOT = "https://openrouter.ai/api/v1";
-const OPENAI_API_ROOT = "https://api.openai.com/v1";
 const MAX_AUTO_CONTINUATIONS = 3;
 const MAX_AUTO_RETRIES = 1;
-const GRADE_THRESHOLDS = Object.freeze({ A: 100, B: 90, C: 80, D: 70, F: 60 });
+const GRADE_THRESHOLDS = Object.freeze({ A: 90, B: 80, C: 70, D: 60, F: 50 });
 
 const value = (id) => document.getElementById(id).value;
 
 function setStatus(message) {
   formStatus.textContent = message;
-}
-
-function renderTokenPreview(lines, state) {
-  tokenPreview.replaceChildren(
-    ...lines.map((line) => {
-      const row = document.createElement("div");
-      row.textContent = line;
-      return row;
-    }),
-  );
-  if (state === "ok" || state === "error") tokenPreview.dataset.state = state;
-  else delete tokenPreview.dataset.state;
-}
-
-function setTokenPreview(message, state) {
-  renderTokenPreview(message.length === 0 ? [] : [message], state);
 }
 
 function describeError(error) {
@@ -207,6 +189,10 @@ function resetTurns() {
   }
   const prompt = firstBlock === null ? null : firstBlock.querySelector(".turn-prompt");
   if (prompt !== null) prompt.value = "";
+  const tokenResult = firstBlock === null ? null : firstBlock.querySelector(".turn-token-result");
+  if (tokenResult !== null) setTurnTokenResult(tokenResult, "");
+  const countButton = firstBlock === null ? null : firstBlock.querySelector(".turn-count");
+  if (countButton instanceof HTMLButtonElement) countButton.disabled = false;
   renumberTurns();
 }
 
@@ -232,7 +218,9 @@ function buildJudgeConfig() {
   if (!judgeEnabledCheckbox.checked) return { enabled: false };
 
   const model = readRequiredValue("judge-model", "Judge model");
-  const secretName = readRequiredValue("judge-secret", "Judge secret name");
+  const secretName = readRequiredValue("judge-secret", "Judge API Key (Env Var Name)");
+  const apiRoot = readRequiredValue("judge-base-url", "Judge base URL");
+  const provider = apiRoot.toLowerCase().includes("openrouter") ? "openrouter" : "openai";
   const transport = checkedRadioValue("judge-transport", "judge transport");
   const historyMode = checkedRadioValue("judge-history", "judge history mode");
   const fileDeliveryMode = checkedRadioValue(
@@ -242,19 +230,20 @@ function buildJudgeConfig() {
   const grade = value("judge-grade");
   const maxGradeThreshold = GRADE_THRESHOLDS[grade];
   if (typeof maxGradeThreshold !== "number") {
-    throw new Error("Select a valid pass grade threshold.");
+    throw new Error("Select a valid minimum acceptable grade.");
   }
 
-  const openRouter = secretName.startsWith("OPENROUTER");
   return {
     enabled: true,
-    provider: openRouter ? "openrouter" : "openai",
-    apiRoot: openRouter ? OPENROUTER_API_ROOT : OPENAI_API_ROOT,
+    provider,
+    apiRoot,
     secretName,
     model,
     transport,
     historyMode,
     fileDeliveryMode,
+    injectOnFail: judgeInjectFailCheckbox.checked,
+    injectOnPass: judgeInjectPassCheckbox.checked,
     developerPrompt: value("judge-prompt"),
     includePrior: false,
     maxGradeThreshold,
@@ -281,37 +270,7 @@ function buildCreateJobCommand(params) {
   };
 }
 
-/**
- * Token preview is first-class across the composer: one unit for the developer
- * context plus one unit per current turn block. Every generation request carries
- * the developer message, so turn units reuse the developer prompt and files.
- */
-function collectTokenPreviewUnits() {
-  const units = [
-    {
-      label: "Developer context",
-      promptText: "",
-      files: developerFilesInput.files,
-      uploadTurnIndex: undefined,
-    },
-  ];
-  for (const block of turnBlocks()) {
-    const parsedIndex = Number(block.dataset.turnIndex);
-    const turnIndex =
-      Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : units.length;
-    const prompt = block.querySelector(".turn-prompt");
-    const filesInput = block.querySelector(".turn-files");
-    units.push({
-      label: "Turn " + turnIndex + " (incl. developer context)",
-      promptText: prompt === null ? "" : prompt.value,
-      files: filesInput === null ? [] : filesInput.files,
-      uploadTurnIndex: turnIndex,
-    });
-  }
-  return units;
-}
-
-/** Reads and validates the preview options shared by every unit. */
+/** Reads and validates the preview options shared by every turn count. */
 function readTokenPreviewOptions() {
   return {
     model: readRequiredValue("job-model", "Model"),
@@ -322,7 +281,7 @@ function readTokenPreviewOptions() {
   };
 }
 
-/** Posts one unit body and resolves with the validated preview response. */
+/** Posts one pending-turn body and resolves with the validated preview response. */
 async function requestTokenPreview(body) {
   const response = await fetch("/api/tokens/preview", {
     method: "POST",
@@ -380,78 +339,65 @@ function updateJudgePanel() {
   judgePanel.setAttribute("aria-disabled", String(!enabled));
 }
 
-async function countTokens() {
-  countTokensButton.disabled = true;
-  setTokenPreview("Counting tokens\u2026");
+/** Reads the 1-based turn index stamped on a rendered turn block. */
+function turnIndexOfBlock(block) {
+  const parsedIndex = Number(block.dataset.turnIndex);
+  return Number.isSafeInteger(parsedIndex) && parsedIndex > 0 ? parsedIndex : null;
+}
+
+/** Writes one turn's projected count into that turn card's status line. */
+function setTurnTokenResult(resultElement, message, state) {
+  resultElement.textContent = message;
+  if (state === "ok" || state === "error") resultElement.dataset.state = state;
+  else delete resultElement.dataset.state;
+}
+
+/**
+ * Counts one turn's pending generation request, including the developer context
+ * that every generation request carries. Only this turn's button is disabled
+ * while its uploads and provider preview run.
+ */
+async function countTurnTokens(button) {
+  const block = button.closest(".turn-block");
+  if (block === null) return;
+  const resultElement = block.querySelector(".turn-token-result");
+  if (resultElement === null) return;
+
+  button.disabled = true;
+  setTurnTokenResult(resultElement, "Counting tokens\u2026");
+
   try {
     const options = readTokenPreviewOptions();
-    const units = collectTokenPreviewUnits();
+    const turnIndex = turnIndexOfBlock(block);
+    if (turnIndex === null) throw new Error("Turn index is missing.");
 
-    // Upload every unit's files first; each turn's files carry that turn index.
-    const uploads = await Promise.allSettled(
-      units.map((unit) => uploadFiles(unit.files, unit.uploadTurnIndex)),
-    );
-    uploads.forEach((outcome, index) => {
-      const unit = units[index];
-      if (outcome.status === "fulfilled") unit.uploadedFileIds = outcome.value;
-      else unit.errorMessage = describeError(outcome.reason);
+    const prompt = block.querySelector(".turn-prompt");
+    const promptText = prompt === null ? "" : prompt.value;
+    const filesInput = block.querySelector(".turn-files");
+    const turnFiles = filesInput === null || filesInput.files === null ? [] : filesInput.files;
+
+    const [developerFileIds, attachmentFileIds] = await Promise.all([
+      uploadFiles(developerFilesInput.files),
+      uploadFiles(turnFiles, turnIndex),
+    ]);
+
+    const preview = await requestTokenPreview({
+      model: options.model,
+      promptText,
+      developerPrompt: options.developerPrompt,
+      developerFileIds,
+      attachmentFileIds,
+      maxOutputTokens: options.maxOutputTokens,
+      reasoningEffort: options.reasoningEffort,
+      webSearch: options.webSearch,
     });
 
-    const developerUnit = units[0];
-    const developerFileIds = developerUnit.uploadedFileIds ?? [];
-
-    // A turn cannot be counted without the developer message it will carry.
-    const countUnits = [];
-    for (const unit of units) {
-      if (unit.errorMessage !== undefined) continue;
-      if (unit !== developerUnit && developerUnit.errorMessage !== undefined) {
-        unit.errorMessage = "developer context upload failed: " + developerUnit.errorMessage;
-        continue;
-      }
-      countUnits.push(unit);
-    }
-
-    // Every preview request goes out together; units are never serialized.
-    const previews = await Promise.allSettled(
-      countUnits.map((unit) =>
-        requestTokenPreview({
-          model: options.model,
-          promptText: unit.promptText,
-          developerPrompt: options.developerPrompt,
-          developerFileIds,
-          attachmentFileIds: unit === developerUnit ? [] : (unit.uploadedFileIds ?? []),
-          maxOutputTokens: options.maxOutputTokens,
-          reasoningEffort: options.reasoningEffort,
-          webSearch: options.webSearch,
-        }),
-      ),
-    );
-
-    const outcomes = new Map();
-    previews.forEach((outcome, index) => {
-      if (outcome.status === "fulfilled") outcomes.set(countUnits[index], outcome.value);
-      else countUnits[index].errorMessage = describeError(outcome.reason);
-    });
-
-    let anyError = false;
-    const lines = units.map((unit) => {
-      if (unit.errorMessage !== undefined) {
-        anyError = true;
-        return unit.label + ": Error: " + unit.errorMessage;
-      }
-      const preview = outcomes.get(unit);
-      if (preview === undefined) {
-        anyError = true;
-        return unit.label + ": Error: token preview was not requested.";
-      }
-      if (preview.admission?.kind !== "admitted") anyError = true;
-      return unit.label + ": " + describeTokenPreview(preview);
-    });
-    renderTokenPreview(lines, anyError ? "error" : "ok");
+    const rejected = preview.admission?.kind !== "admitted";
+    setTurnTokenResult(resultElement, describeTokenPreview(preview), rejected ? "error" : "ok");
   } catch (error) {
-    setTokenPreview("Error: " + describeError(error), "error");
+    setTurnTokenResult(resultElement, "Error: " + describeError(error), "error");
   } finally {
-    countTokensButton.disabled = false;
+    button.disabled = false;
   }
 }
 
@@ -494,7 +440,6 @@ async function createJob(event) {
     form.reset();
     resetTurns();
     updateJudgePanel();
-    setTokenPreview("");
     setStatus("Job created.");
     await refreshJobs();
   } catch (error) {
@@ -527,10 +472,14 @@ async function openJobDetail(jobId) {
 document.getElementById("add-turn").addEventListener("click", addTurn);
 turnsContainer.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
-  const button = event.target.closest(".turn-remove");
-  if (button !== null) removeTurn(button);
+  const countButton = event.target.closest(".turn-count");
+  if (countButton instanceof HTMLButtonElement) {
+    void countTurnTokens(countButton);
+    return;
+  }
+  const removeButton = event.target.closest(".turn-remove");
+  if (removeButton !== null) removeTurn(removeButton);
 });
-countTokensButton.addEventListener("click", countTokens);
 judgeEnabledCheckbox.addEventListener("change", updateJudgePanel);
 form.addEventListener("submit", createJob);
 jobList.addEventListener("click", (event) => {

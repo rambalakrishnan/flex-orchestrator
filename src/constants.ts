@@ -262,6 +262,9 @@ export const WEBHOOK_OPENAI_PATH = "/openai" as const;
 /** Marginal token preview pathname served on the application host. */
 export const TOKEN_PREVIEW_PATH = "/api/tokens/preview" as const;
 
+/** Operator diagnostics pathname served on the application host. */
+export const HEALTH_PATH = "/api/health" as const;
+
 /** Canonical singleton Durable Object names for global coordinators. */
 export const REGISTRY_DO_NAME = "global-registry" as const;
 export const ROUTER_DO_NAME = "global-router" as const;

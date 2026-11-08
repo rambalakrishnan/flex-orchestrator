@@ -138,7 +138,7 @@ afterEach(async () => {
 
 **2a. Server-rendered HTML fragments and Markdown safety.** The application serves pre-rendered HTML fragments; no JSON state is rendered client-side.
 - `GET /api/jobs/fragment` reads the registry job index through `REGISTRY_DO.listJobs` (optional `limit`/`cursor`, unknown query keys rejected) and returns `renderJobList(page.items)`.
-- `GET /api/jobs/:jobId/fragment` returns `404` when `JobDO.getState()` is `null`; otherwise it pages `listTurns` (limit 100, bounded to 4 pages), selects turns with status `accepted` or `accepted_with_warning` and a non-null `accepted_candidate_id`, reads each `candidate_deliverable` artifact, decodes UTF-8, and returns `renderJobDetail(state, deliverables)`.
+- `GET /api/jobs/:jobId/fragment` returns `404` when `JobDO.getState()` is `null`; otherwise it pages `listTurns`, `listAttempts`, and `listJudgeCalls` (limit 100, bounded to 4 pages), selects turns with status `accepted` or `accepted_with_warning` and a non-null `accepted_candidate_id`, reads each `candidate_deliverable` artifact, decodes UTF-8, and returns `renderJobDetail(state, deliverables, turnSummaries, attemptSummaries, judgeCallSummaries)`. The fragment renders escaped turn prompts/anchors, attempt rows, judge verdicts/grades/comments, and Markdown deliverables.
 - Both fragments are matched before the generic `jobId` parser, return `Content-Type: text/html; charset=utf-8` with `Cache-Control: no-store`, and reject non-`GET` with `405`. Non-API paths continue to be served from `ASSETS`.
 - Model output is rendered only through `src/lib/markdown.ts`. `marked@18.1.3` has **no** `escapeRawHtml` option; the module neutralizes raw HTML by escaping `renderer.html` token text and rewrites unsafe `javascript:`, `vbscript:`, and `data:` link/image hrefs to `#` in `walkTokens`.
 - `renderMarkdown()` enforces a hard character limit: `text.length > 250,000` returns exactly `<p>Error: Output exceeds maximum safe rendering length.</p>` without parsing; exactly 250,000 characters still parses. Every non-Markdown dynamic value in views goes through `escapeHtml()`.
@@ -280,11 +280,12 @@ These checks exercise real Cloudflare and OpenAI infrastructure and cannot be fu
 ### Frontend (manual only)
 No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] `public/index.html` loads and `/app.css` and `/app.js` return `200` from the application host.
-- [ ] Submitting the Create Job form posts a valid `CreateJobCommand` and the job appears in `#job-list` after the next fragment poll.
+- [ ] Submitting the Create Job form uploads developer/turn files, posts a valid `CreateJobCommand` (developer context, dynamic turns, judge panel), and the job appears in `#job-list` after the next fragment poll.
+- [ ] Count Tokens uploads developer files and shows the projected input count and admission for the selected model.
 - [ ] The list refreshes every 12 seconds by replacing `#job-list` with the `/api/jobs/fragment` HTML.
 - [ ] Clicking a job card loads `/api/jobs/:id/fragment` into the dialog and rendered Markdown is visible.
 - [ ] A job title containing `<img onerror=...>` renders as text, and model output containing raw HTML renders escaped, not executable.
-- [ ] The `public/app.js` source remains under 100 lines.
+- [ ] The `public/app.js` source stays dependency-free and under 500 lines (lightweight vanilla module; no build step).
 
 ### OpenAI webhook registration
 - [ ] OpenAI dashboard → Webhooks lists `https://hooks.example.com/openai` with the four subscriptions.

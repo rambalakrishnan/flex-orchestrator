@@ -136,6 +136,14 @@ afterEach(async () => {
 
 **2. Browser-origin enforcement and secret hygiene.** State-changing browser requests without the application `Origin` are rejected. Stored request bodies, logs, and exports never contain credential values; authorization headers are resolved at call time only. Model output is emitted as text or sanitized Markdown (no raw HTML injection). Cover: `src/http.ts`, `src/do/job-do.ts`, `src/lib/openai.ts`, `public/app.js`.
 
+**2a. Server-rendered HTML fragments and Markdown safety.** The application serves pre-rendered HTML fragments; no JSON state is rendered client-side.
+- `GET /api/jobs/fragment` reads the registry job index through `REGISTRY_DO.listJobs` (optional `limit`/`cursor`, unknown query keys rejected) and returns `renderJobList(page.items)`.
+- `GET /api/jobs/:jobId/fragment` returns `404` when `JobDO.getState()` is `null`; otherwise it pages `listTurns` (limit 100, bounded to 4 pages), selects turns with status `accepted` or `accepted_with_warning` and a non-null `accepted_candidate_id`, reads each `candidate_deliverable` artifact, decodes UTF-8, and returns `renderJobDetail(state, deliverables)`.
+- Both fragments are matched before the generic `jobId` parser, return `Content-Type: text/html; charset=utf-8` with `Cache-Control: no-store`, and reject non-`GET` with `405`. Non-API paths continue to be served from `ASSETS`.
+- Model output is rendered only through `src/lib/markdown.ts`. `marked@18.1.3` has **no** `escapeRawHtml` option; the module neutralizes raw HTML by escaping `renderer.html` token text and rewrites unsafe `javascript:`, `vbscript:`, and `data:` link/image hrefs to `#` in `walkTokens`.
+- `renderMarkdown()` enforces a hard character limit: `text.length > 250,000` returns exactly `<p>Error: Output exceeds maximum safe rendering length.</p>` without parsing; exactly 250,000 characters still parses. Every non-Markdown dynamic value in views goes through `escapeHtml()`.
+Cover: `src/lib/markdown.ts`, `src/views/jobs.ts`, `src/handlers/jobs.ts`, `src/index.ts`, `test/unit/markdown.test.ts`, `test/integration/routing.test.ts`.
+
 ### Files and storage
 **3. Files API contract.** Uploads use `purpose: "user_data"` and produce `file_id` references; inline text, base64, and `file_url` are rejected at the submission interface. Uploads are bounded to **16,000,000 file bytes**; multipart parsing, buffering, and hashing remain bounded. Test multipart parsing and hashing at a small size; include exactly one integration test at the 16,000,000 / 16,000,001 boundary using `new Uint8Array(N)` (not a string) to avoid encoding overhead. Cover: `src/handlers/files.ts`, `src/do/registry-do.ts`.
 
@@ -173,12 +181,12 @@ Cover: `src/lib/dispatch.ts`, `src/db/attempts.ts`.
 
 **9. Cumulative assembly, structural classification, and precedence.** Cumulative text concatenates the active run’s extracted deliverable across continuations, including tags split across continuation boundaries. Structural evaluation runs on cumulative text. Precedence is fixed: **provider failure, cancellation, and refusal handling take precedence over empty-output classification**, and **`empty_output` never reaches the judge**. Cover at minimum:
 - `""`, `"   "`, `"\n\n"`, `"\t"` → `empty_output`; no judge call
-- `"<!-- done -->"` → `empty_output`; no judge call
-- `"<!-- done --><!-- done -->"` → `empty_output`; no judge call
-- `"foo<!-- done -->"` → accepted candidate; judge called; trailing content absent
-- `"<!-- done -->foo"` → **`trailing_content`** structural outcome: `foo` is truncated from the exported text, the judge is not asked to evaluate trailing bytes as deliverable, and a structural warning is passed to the judge (or to the recovery path per §8A).
-- `"foo<!-- done -->bar"` → `trailing_content`; `foo` retained, `bar` truncated with warning
-- Tag split across continuations (`"<do"` + `"ne>"`) → single tag recognized; classification matches the joined output
+- `"<!-- TURN_END:1 -->"` → `empty_output`; no judge call
+- `"<!-- TURN_END:1 --><!-- TURN_END:1 -->"` → `malformed_tag`; no judge call
+- `"foo<!-- TURN_END:1 -->"` → accepted candidate; judge called; trailing content absent
+- `"<!-- TURN_END:1 -->foo"` → **`trailing_content`** structural outcome: `foo` is truncated from the exported text, the judge is not asked to evaluate trailing bytes as deliverable, and a structural warning is passed to the judge (or to the recovery path per §8A).
+- `"foo<!-- TURN_END:1 -->bar"` → `trailing_content`; `foo` retained, `bar` truncated with warning
+- Marker split across continuations (`"<!-- TURN_E"` + `"ND:1 -->"`) → single marker recognized; classification matches the joined output
 - Provider error part returned alongside text → provider path; not `empty_output`; not judge
 - **Refusal part returned alongside text → refusal path; not `empty_output`; the judge is not invoked.** Assert via `judge` spy: zero calls.
 - Cancellation observed alongside text → cancellation path; not `empty_output`; judge not invoked
@@ -269,6 +277,15 @@ These checks exercise real Cloudflare and OpenAI infrastructure and cannot be fu
 - [ ] `hooks.example.com` is reachable without Access; other paths on that hostname return 404.
 - [ ] State-changing browser requests from a foreign origin are rejected.
 
+### Frontend (manual only)
+No browser-based E2E tests are defined; `public/app.js` is verified by hand.
+- [ ] `public/index.html` loads and `/app.css` and `/app.js` return `200` from the application host.
+- [ ] Submitting the Create Job form posts a valid `CreateJobCommand` and the job appears in `#job-list` after the next fragment poll.
+- [ ] The list refreshes every 12 seconds by replacing `#job-list` with the `/api/jobs/fragment` HTML.
+- [ ] Clicking a job card loads `/api/jobs/:id/fragment` into the dialog and rendered Markdown is visible.
+- [ ] A job title containing `<img onerror=...>` renders as text, and model output containing raw HTML renders escaped, not executable.
+- [ ] The `public/app.js` source remains under 100 lines.
+
 ### OpenAI webhook registration
 - [ ] OpenAI dashboard → Webhooks lists `https://hooks.example.com/openai` with the four subscriptions.
 - [ ] A test event from the OpenAI dashboard is acknowledged by RouterDO (inbox record created).
@@ -327,6 +344,7 @@ Helpers must intercept outbound `fetch` at the `ProviderIO` seam so canonical-re
 - `src/lib/signature.ts` byte-exactness, field concatenation (ID + timestamp + body), and timestamp-tolerance paths are covered by both positive and negative tests, including a `webhook-id`-only tamper case.
 - `src/db/router.ts` inbox idempotency and out-of-order handling have explicit duplicate and reordered-event tests.
 - `src/lib/dispatch.ts` long-context classification has explicit tests at 271,999 / 272,000 / 272,001 with cached input included. Idempotency-Key **presence** and stability across retries are explicitly asserted; the test does not assert a string format the architecture does not define.
+- `src/lib/markdown.ts` has explicit tests for raw-HTML neutralization, unsafe link/image protocols, and the 250,000/250,001 character boundary; `src/handlers/jobs.ts` fragment routes assert HTML content type, no-store caching, `404` for missing jobs, and escaping of hostile job metadata.
 - `src/lib/judge.ts` stateful history has explicit tests for both commit-before-success and failure-before-response-ID-commit attachment behavior.
 - `src/do/job-do.ts` branch activation has an explicit superseding-race test.
 - Test files use `reset()` and `abortAllDurableObjects()` in `afterEach` and settle all scheduled alarms before finishing; no test relies on fresh Durable Object IDs as its primary isolation mechanism.

@@ -4,8 +4,9 @@
  *
  * Every fragment is intended for an `innerHTML` swap. Only accepted deliverable
  * text is inserted through `renderMarkdown`; every other dynamic value,
- * including raw turn prompts, flows through `escapeHtml`. File ids, error
- * details, and credentials are never interpolated here.
+ * including raw turn prompts, error codes and messages, response identifiers,
+ * provider diagnostics, and file ids, flows through `escapeHtml`. Credentials
+ * are never interpolated here.
  */
 
 import type {
@@ -89,6 +90,8 @@ function renderDeliverable(
   deliverable: JobDeliverable,
   marginalInputTokens: number | null,
   judgeCalls: readonly JudgeCallSummaryRow[],
+  acceptedResponseId: string | null,
+  latestProviderResponseId: string | null,
 ): string {
   const marginal =
     marginalInputTokens === null
@@ -100,6 +103,8 @@ function renderDeliverable(
     `<header class="deliverable-header">`,
     `<h3 class="deliverable-turn">Turn ${escapeHtml(String(deliverable.turnIndex))}</h3>`,
     renderStatusBadge(deliverable.status),
+    `<span class="deliverable-response-id turn-response">Accepted response: ${renderResponseId(acceptedResponseId)}</span>`,
+    `<span class="deliverable-latest-response-id turn-response">Latest provider response: ${renderResponseId(latestProviderResponseId)}</span>`,
     marginal,
     `</header>`,
     `<div class="deliverable-content">${renderMarkdown(deliverable.text)}</div>`,
@@ -146,11 +151,179 @@ function renderOptionalCode(value: string | null): string {
   return `<code>${escapeHtml(value)}</code>`;
 }
 
+/** Response identifiers stay selectable and escaped; absent values stay muted. */
+function renderResponseId(value: string | null): string {
+  if (value === null || value === "") {
+    return `<span class="muted">—</span>`;
+  }
+  return `<span class="response-id">${escapeHtml(value)}</span>`;
+}
+
 function renderFlag(value: number | null): string {
   if (value === null) {
     return `<span class="muted">—</span>`;
   }
   return value === 1 ? "Yes" : "No";
+}
+
+/**
+ * Job statuses that accept an in-place resume. `paused_review` deliberately
+ * requires a turn retry or an operator review decision instead.
+ */
+function isResumeJobStatus(
+  status: JobStateResponse["job"]["status"],
+): boolean {
+  return (
+    status === "failed" ||
+    status === "paused_dispatch" ||
+    status === "paused_storage"
+  );
+}
+
+/** Statuses where the current turn may be retried manually. */
+function isRetryTurnStatus(
+  status: JobStateResponse["job"]["status"],
+): boolean {
+  return isResumeJobStatus(status) || status === "paused_review";
+}
+
+/**
+ * Renders the persisted job-level failure as an escaped alert. Either the
+ * stable `errorCode` or the free-form `errorMessage` may be present alone; the
+ * banner only appears when at least one carries content.
+ */
+function renderJobErrorBanner(job: JobStateResponse): string {
+  const errorCode =
+    typeof job.job.errorCode === "string" &&
+    job.job.errorCode.trim().length > 0
+      ? job.job.errorCode
+      : null;
+  const errorMessage =
+    typeof job.job.errorMessage === "string" &&
+    job.job.errorMessage.trim().length > 0
+      ? job.job.errorMessage
+      : null;
+  if (errorCode === null && errorMessage === null) {
+    return "";
+  }
+
+  return [
+    `<div class="job-error" role="alert">`,
+    errorCode === null
+      ? ""
+      : `<code class="job-error-code">${escapeHtml(errorCode)}</code>`,
+    errorMessage === null
+      ? ""
+      : `<p class="job-error-message">${escapeHtml(errorMessage)}</p>`,
+    `</div>`,
+  ].join("");
+}
+
+function renderResumeJobButton(jobId: string): string {
+  return `<button type="button" class="action-button" data-action="resume-job" data-job-id="${escapeHtml(jobId)}">Resume Job</button>`;
+}
+
+function renderRetryTurnButton(jobId: string, turnIndex: number): string {
+  return `<button type="button" class="action-button" data-action="retry-turn" data-job-id="${escapeHtml(jobId)}" data-turn-index="${escapeHtml(String(turnIndex))}">Retry Turn</button>`;
+}
+
+function renderCheckHealthButton(jobId: string): string {
+  return `<button type="button" class="action-button" data-action="check-health" data-job-id="${escapeHtml(jobId)}">Check Health</button>`;
+}
+
+function renderJsonlDownloadLink(jobId: string): string {
+  return `<a class="download-jsonl" href="/api/jobs/${escapeHtml(encodeURIComponent(jobId))}/export/jsonl" download>Download JSONL</a>`;
+}
+
+interface AttemptProviderError {
+  readonly code: string | null;
+  readonly message: string | null;
+}
+
+/** Diagnostics are JSON text under the storage guard; malformed text is ignored. */
+function parseDiagnosticsRecord(
+  raw: string,
+): Readonly<Record<string, unknown>> | null {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function readAttemptProviderError(raw: string): AttemptProviderError {
+  const diagnostics = parseDiagnosticsRecord(raw);
+  if (diagnostics === null) {
+    return { code: null, message: null };
+  }
+  const rawCode = diagnostics.provider_error_code;
+  const rawMessage = diagnostics.provider_error_message;
+  return {
+    code:
+      typeof rawCode === "string" && rawCode.length > 0 ? rawCode : null,
+    message:
+      typeof rawMessage === "string" && rawMessage.length > 0
+        ? rawMessage
+        : null,
+  };
+}
+
+function renderAttemptProviderError(rawDiagnostics: string): string {
+  const { code, message } = readAttemptProviderError(rawDiagnostics);
+  if (code === null && message === null) {
+    return `<span class="muted">—</span>`;
+  }
+  return [
+    `<div class="provider-error">`,
+    code === null
+      ? ""
+      : `<code class="provider-error-code">${escapeHtml(code)}</code>`,
+    message === null
+      ? ""
+      : `<span class="provider-error-message">${escapeHtml(message)}</span>`,
+    `</div>`,
+  ].join("");
+}
+
+/**
+ * Picks the most advanced attempt for each turn. Attempt numbers order full
+ * retries; continuation index and the identifier break ties deterministically.
+ */
+function latestAttemptByTurn(
+  attempts: readonly GenerationAttemptSummaryRow[],
+): ReadonlyMap<number, GenerationAttemptSummaryRow> {
+  const latest = new Map<number, GenerationAttemptSummaryRow>();
+  for (const attempt of attempts) {
+    const current = latest.get(attempt.turn_index);
+    if (current === undefined || attemptIsNewer(attempt, current)) {
+      latest.set(attempt.turn_index, attempt);
+    }
+  }
+  return latest;
+}
+
+function attemptIsNewer(
+  candidate: GenerationAttemptSummaryRow,
+  current: GenerationAttemptSummaryRow,
+): boolean {
+  if (candidate.attempt_number !== current.attempt_number) {
+    return candidate.attempt_number > current.attempt_number;
+  }
+  if (candidate.continuation_index !== current.continuation_index) {
+    return candidate.continuation_index > current.continuation_index;
+  }
+  return candidate.attempt_id > current.attempt_id;
 }
 
 function renderTime(value: string): string {
@@ -193,6 +366,8 @@ function renderTableRow(cells: readonly string[]): string {
 function renderTurnsTable(
   turns: readonly TurnSummaryRow[],
   promptTextByTurnIndex: ReadonlyMap<number, string>,
+  latestAttempts: ReadonlyMap<number, GenerationAttemptSummaryRow>,
+  job: JobStateResponse,
 ): string {
   const rows = turns.map((turn) => {
     const promptText = promptTextByTurnIndex.get(turn.turn_index);
@@ -210,22 +385,40 @@ function renderTurnsTable(
         ? `<span class="muted">—</span>`
         : [
             `<div class="accepted-candidate">${renderOptionalCode(turn.accepted_candidate_id)}</div>`,
-            `<div class="accepted-response">${renderOptionalCode(turn.accepted_response_id)}</div>`,
+            `<div class="accepted-response">${renderResponseId(turn.accepted_response_id)}</div>`,
           ].join("");
+    const latestProviderResponse =
+      latestAttempts.get(turn.turn_index)?.provider_response_id ?? null;
+    const retryAction =
+      isRetryTurnStatus(job.job.status) &&
+      turn.turn_index === job.job.currentTurnIndex
+        ? renderRetryTurnButton(job.job.jobId, turn.turn_index)
+        : `<span class="muted">—</span>`;
 
     return renderTableRow([
       escapeHtml(String(turn.turn_index)),
       renderStatusBadge(turn.status),
       prompt,
       anchor,
+      renderResponseId(latestProviderResponse),
       renderOptionalText(turn.marginal_input_tokens),
       renderTime(turn.updated_at),
+      `<div class="turn-actions">${retryAction}</div>`,
     ]);
   });
 
   return renderTable(
     "turn-table",
-    ["Turn", "Status", "Prompt", "Accepted anchor", "Marginal tokens", "Updated"],
+    [
+      "Turn",
+      "Status",
+      "Prompt",
+      "Accepted anchor",
+      "Latest provider response",
+      "Marginal tokens",
+      "Updated",
+      "Actions",
+    ],
     rows,
     "No turns recorded yet.",
   );
@@ -240,7 +433,8 @@ function renderAttemptsTable(
       escapeHtml(String(attempt.turn_index)),
       escapeHtml(attempt.kind),
       renderStatusBadge(attempt.status),
-      renderOptionalCode(attempt.provider_response_id),
+      renderResponseId(attempt.provider_response_id),
+      renderAttemptProviderError(attempt.diagnostics_json),
       escapeHtml(String(attempt.capacity_sends)),
       escapeHtml(String(attempt.poll_probes)),
       renderTime(attempt.created_at),
@@ -256,6 +450,7 @@ function renderAttemptsTable(
       "Kind",
       "Status",
       "Provider response",
+      "Provider error",
       "Capacity sends",
       "Poll probes",
       "Created",
@@ -316,7 +511,8 @@ function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): stri
  * the frozen marginal input token count when one is stored. Turn prompts come
  * from the job state (`TurnRecord.promptText`) because summary rows carry only
  * prompt byte counts; every prompt, table cell, judge comment, and identifier
- * is escaped. A completed job links to its final-markdown download.
+ * is escaped. Failed and paused jobs render an escaped error banner with
+ * recovery controls, and every job links to its JSONL export.
  */
 export function renderJobDetail(
   job: JobStateResponse,
@@ -327,12 +523,31 @@ export function renderJobDetail(
 ): string {
   const promptTextByTurnIndex = new Map<number, string>();
   const marginalTokensByTurnIndex = new Map<number, number>();
+  const acceptedResponseByTurnIndex = new Map<number, string | null>();
   for (const turn of job.turns) {
     promptTextByTurnIndex.set(turn.turnIndex, turn.promptText);
+    acceptedResponseByTurnIndex.set(
+      turn.turnIndex,
+      turn.acceptedResponseId,
+    );
     if (turn.marginalInputTokens !== null) {
       marginalTokensByTurnIndex.set(turn.turnIndex, turn.marginalInputTokens);
     }
   }
+  for (const turn of turns) {
+    const knownResponseId = acceptedResponseByTurnIndex.get(turn.turn_index);
+    if (
+      (knownResponseId === undefined || knownResponseId === null) &&
+      turn.accepted_response_id !== null
+    ) {
+      acceptedResponseByTurnIndex.set(
+        turn.turn_index,
+        turn.accepted_response_id,
+      );
+    }
+  }
+
+  const latestAttempts = latestAttemptByTurn(attempts);
 
   const judgeCallsByTurnIndex = new Map<number, JudgeCallSummaryRow[]>();
   for (const judgeCall of judgeCalls) {
@@ -354,6 +569,9 @@ export function renderJobDetail(
               deliverable,
               marginalTokensByTurnIndex.get(deliverable.turnIndex) ?? null,
               judgeCallsByTurnIndex.get(deliverable.turnIndex) ?? [],
+              acceptedResponseByTurnIndex.get(deliverable.turnIndex) ?? null,
+              latestAttempts.get(deliverable.turnIndex)?.provider_response_id ??
+                null,
             ),
           )
           .join("");
@@ -362,9 +580,34 @@ export function renderJobDetail(
     job.job.status === "completed"
       ? `<a class="button download-final" href="/api/jobs/${escapeHtml(encodeURIComponent(job.job.jobId))}/export/markdown" download>Download Final Markdown</a>`
       : "";
+  const jobActions = [
+    isResumeJobStatus(job.job.status)
+      ? renderResumeJobButton(job.job.jobId)
+      : "",
+    renderCheckHealthButton(job.job.jobId),
+    renderJsonlDownloadLink(job.job.jobId),
+    downloadFinal,
+  ].join("");
+
+  const responseAnchors: string[] = [];
+  if (
+    job.job.acceptedTurnCount === 0 &&
+    job.job.lastAcceptedResponseId !== null
+  ) {
+    responseAnchors.push(
+      `<p class="job-detail-anchor">Initial response: ${renderResponseId(job.job.lastAcceptedResponseId)}</p>`,
+    );
+  }
+  const activeResponseId = job.activeAttempt?.responseId ?? null;
+  if (activeResponseId !== null) {
+    responseAnchors.push(
+      `<p class="job-detail-anchor">Active response: ${renderResponseId(activeResponseId)}</p>`,
+    );
+  }
 
   return [
     `<article class="job-detail" data-job-id="${escapeHtml(job.job.jobId)}">`,
+    renderJobErrorBanner(job),
     `<header class="job-detail-header">`,
     `<h1 class="job-detail-title">${escapeHtml(job.job.title)}</h1>`,
     `<p class="job-detail-meta">`,
@@ -372,12 +615,13 @@ export function renderJobDetail(
     `<span class="job-detail-model">${escapeHtml(job.job.config.model)}</span>`,
     `<span class="job-detail-id">${escapeHtml(job.job.jobId)}</span>`,
     `</p>`,
+    responseAnchors.join(""),
     `<dl class="job-detail-counters">`,
     renderCount("Turn count", job.turns.length),
     renderCount("Accepted turns", job.job.acceptedTurnCount),
     `</dl>`,
     renderUsageSummary(job),
-    downloadFinal,
+    `<div class="job-actions">${jobActions}</div>`,
     `</header>`,
     `<section class="deliverables">`,
     `<h2 class="deliverables-title">Deliverables</h2>`,
@@ -385,7 +629,7 @@ export function renderJobDetail(
     `</section>`,
     `<section class="detail-section">`,
     `<h3 class="detail-section-title">Turns</h3>`,
-    renderTurnsTable(turns, promptTextByTurnIndex),
+    renderTurnsTable(turns, promptTextByTurnIndex, latestAttempts, job),
     `</section>`,
     `<section class="detail-section">`,
     `<h3 class="detail-section-title">Attempts</h3>`,

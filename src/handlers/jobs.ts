@@ -110,6 +110,8 @@ interface JobDoRpcStub {
   getState(): Promise<JobStateResponse | null>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
+  resumeJob(): Promise<JobStateResponse>;
+  retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
   initializeBranch(snapshot: BranchSnapshot): Promise<BranchCreationOutcome>;
   listTurns(
@@ -194,6 +196,33 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
     rejectUnknownQuery(url, []);
     return exportFinalMarkdown(env, jobId);
   }
+  if (
+    subpath.length === 2 &&
+    subpath[0] === "export" &&
+    subpath[1] === "jsonl"
+  ) {
+    if (method !== "GET") {
+      return methodNotAllowed(["GET"]);
+    }
+    rejectUnknownQuery(url, []);
+    return exportJsonl(env, jobId);
+  }
+  if (
+    subpath.length === 3 &&
+    subpath[0] === "turns" &&
+    subpath[2] === "retry"
+  ) {
+    if (method !== "POST") {
+      return methodNotAllowed(["POST"]);
+    }
+    assertApplicationOrigin(request, env);
+    rejectUnknownQuery(url, []);
+    const rawTurnIndex = subpath[1];
+    if (rawTurnIndex === undefined) {
+      return notFound();
+    }
+    return retryTurn(env, jobId, rawTurnIndex);
+  }
   if (subpath.length !== 1) {
     return notFound();
   }
@@ -205,6 +234,13 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
       }
       rejectUnknownQuery(url, []);
       return getJobFragment(env, jobId);
+    case "resume":
+      if (method !== "POST") {
+        return methodNotAllowed(["POST"]);
+      }
+      assertApplicationOrigin(request, env);
+      rejectUnknownQuery(url, []);
+      return resumeJob(env, jobId);
     case "turns":
       if (method === "GET") {
         rejectUnknownQuery(url, ["limit", "cursor"]);
@@ -365,6 +401,37 @@ async function reviewJob(
   const stub = getJobStub(env, jobId);
   try {
     return jsonResponse(await stub.applyOperatorDecision(decision));
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+/**
+ * Resumes a failed job or one paused by a dispatch/storage fault. Status
+ * preconditions are enforced inside `JobDO`.
+ */
+async function resumeJob(env: Env, jobId: JobId): Promise<Response> {
+  const stub = getJobStub(env, jobId);
+  try {
+    return jsonResponse(await stub.resumeJob());
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+/**
+ * Retries the current turn of a recoverable job. The turn position is parsed
+ * from the path, and `JobDO` verifies it matches the current turn index.
+ */
+async function retryTurn(
+  env: Env,
+  jobId: JobId,
+  rawTurnIndex: string,
+): Promise<Response> {
+  const turnIndex = parsePathTurnIndex(rawTurnIndex);
+  const stub = getJobStub(env, jobId);
+  try {
+    return jsonResponse(await stub.retryTurn(turnIndex));
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
@@ -818,6 +885,155 @@ async function exportJson(env: Env, jobId: JobId): Promise<Response> {
     "application/json; charset=utf-8",
     { filename: exportFilename(jobId, "json") },
   );
+}
+
+/**
+ * Streams a newline-delimited JSON observation of a job. Each line is one
+ * complete JSON record: the job definition first, then turns (with prompt and
+ * accepted deliverable text), attempts, and judge calls. Only summary rows are
+ * read; stored request bodies are never included, and credentials never enter
+ * the export.
+ */
+async function exportJsonl(env: Env, jobId: JobId): Promise<Response> {
+  const stub = getJobStub(env, jobId);
+  let state: JobStateResponse;
+  try {
+    const loaded = await stub.getState();
+    if (loaded === null) {
+      return notFound("Job not found");
+    }
+    state = loaded;
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+
+  return streamResponse(
+    streamTextChunks(jsonlExportChunks(stub, state)),
+    "application/x-ndjson; charset=utf-8",
+    { filename: jsonlExportFilename(jobId) },
+  );
+}
+
+async function* jsonlExportChunks(
+  stub: JobDoRpcStub,
+  state: JobStateResponse,
+): AsyncGenerator<string, void, void> {
+  yield `${toJson({ type: "job", exportVersion: 1, job: state.job })}\n`;
+
+  const promptTextByTurnIndex = new Map<number, string>();
+  for (const turn of state.turns) {
+    promptTextByTurnIndex.set(turn.turnIndex, turn.promptText);
+  }
+
+  try {
+    let cursor: string | null = null;
+    for (;;) {
+      const page = await stub.listTurns({
+        limit: EXPORT_PAGE_LIMIT,
+        ...(cursor === null ? {} : { cursor }),
+      });
+      for (const turn of page.items) {
+        const record = await buildJsonlTurnRecord(
+          stub,
+          turn,
+          promptTextByTurnIndex,
+        );
+        yield `${toJson(record)}\n`;
+      }
+      const nextCursor = page.nextCursor;
+      if (!page.hasMore || nextCursor === null || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+  } catch {
+    // The response has already started; mark the truncation instead of
+    // pretending the remaining records do not exist.
+    yield exportIncompleteLine("turns");
+    return;
+  }
+
+  try {
+    let cursor: string | null = null;
+    for (;;) {
+      const page = await stub.listAttempts({
+        limit: EXPORT_PAGE_LIMIT,
+        ...(cursor === null ? {} : { cursor }),
+      });
+      for (const attempt of page.items) {
+        yield `${toJson({ type: "attempt", attempt })}\n`;
+      }
+      const nextCursor = page.nextCursor;
+      if (!page.hasMore || nextCursor === null || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+  } catch {
+    yield exportIncompleteLine("attempts");
+    return;
+  }
+
+  try {
+    let cursor: string | null = null;
+    for (;;) {
+      const page = await stub.listJudgeCalls({
+        limit: EXPORT_PAGE_LIMIT,
+        ...(cursor === null ? {} : { cursor }),
+      });
+      for (const judgeCall of page.items) {
+        yield `${toJson({ type: "judge_call", judgeCall })}\n`;
+      }
+      const nextCursor = page.nextCursor;
+      if (!page.hasMore || nextCursor === null || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+  } catch {
+    yield exportIncompleteLine("judge_calls");
+  }
+}
+
+function exportIncompleteLine(section: string): string {
+  return `${toJson({
+    type: "export_incomplete",
+    exportVersion: 1,
+    section,
+    reason: "internal_error",
+  })}\n`;
+}
+
+async function buildJsonlTurnRecord(
+  stub: JobDoRpcStub,
+  turn: TurnSummaryRow,
+  promptTextByTurnIndex: ReadonlyMap<number, string>,
+): Promise<Record<string, unknown>> {
+  const accepted =
+    turn.status === "accepted" || turn.status === "accepted_with_warning";
+  const candidateId = turn.accepted_candidate_id;
+  let deliverable: string | null = null;
+  if (
+    accepted &&
+    typeof candidateId === "string" &&
+    candidateId.length > 0
+  ) {
+    const artifact = await stub.readArtifact({
+      kind: "candidate_deliverable",
+      id: candidateId,
+    });
+    if (artifact !== null) {
+      deliverable = decodeArtifactText(artifact.bytes);
+    }
+  }
+
+  return {
+    type: "turn",
+    turn,
+    responseId: turn.accepted_response_id,
+    prompt: promptTextByTurnIndex.get(turn.turn_index) ?? null,
+    deliverable,
+  };
 }
 
 /**
@@ -1331,6 +1547,34 @@ function parseCreateJobCommand(value: unknown): CreateJobCommand {
     );
   }
   const title = requireString(body.title, "title");
+  const rawPreviousResponseId = body.initialPreviousResponseId;
+  if (
+    rawPreviousResponseId !== undefined &&
+    rawPreviousResponseId !== null &&
+    typeof rawPreviousResponseId !== "string"
+  ) {
+    throw new HttpError(
+      400,
+      "invalid_request_body",
+      "initialPreviousResponseId must be a string, null, or omitted",
+    );
+  }
+  const initialPreviousResponseId =
+    typeof rawPreviousResponseId === "string" &&
+    rawPreviousResponseId.trim().length > 0
+      ? rawPreviousResponseId.trim()
+      : null;
+  if (
+    initialPreviousResponseId !== null &&
+    (initialPreviousResponseId.length > 512 ||
+      /[\u0000-\u0020\u007f]/.test(initialPreviousResponseId))
+  ) {
+    throw new HttpError(
+      400,
+      "invalid_request_body",
+      "initialPreviousResponseId must be at most 512 characters without whitespace or control characters",
+    );
+  }
   const config = requireRecord(
     body.config,
     400,
@@ -1385,6 +1629,7 @@ function parseCreateJobCommand(value: unknown): CreateJobCommand {
     title,
     config: config as unknown as JobConfig,
     initialTurns,
+    initialPreviousResponseId,
   };
 }
 
@@ -1483,6 +1728,37 @@ function parseTurnIndexValue(
   } catch {
     throw new HttpError(status, code, `${label} must be a positive integer`);
   }
+}
+
+/**
+ * Parses the 1-based turn position carried by a URL path segment. The segment
+ * is decoded once; anything other than a plain positive integer is rejected
+ * before the RPC boundary.
+ */
+function parsePathTurnIndex(rawValue: string): TurnIndex {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawValue);
+  } catch {
+    throw new HttpError(
+      400,
+      "invalid_turn_index",
+      "turnIndex must be a positive integer",
+    );
+  }
+  if (!/^[0-9]+$/.test(decoded)) {
+    throw new HttpError(
+      400,
+      "invalid_turn_index",
+      "turnIndex must be a positive integer",
+    );
+  }
+  return parseTurnIndexValue(
+    Number(decoded),
+    "turnIndex",
+    400,
+    "invalid_turn_index",
+  );
 }
 
 function requireString(value: unknown, label: string): string {
@@ -1802,8 +2078,19 @@ function rpcErrorResponse(err: unknown): Response {
     return errorResponse(status, code, "Request failed");
   }
 
-  const message = err instanceof Error ? err.message.toLowerCase() : "";
-  if (message.includes("not found") || message.includes("no such job")) {
+  const message = err instanceof Error ? err.message : "";
+  if (message.includes("retryTurn requires the current turn index")) {
+    return conflict("Turn index is not the current turn", "turn_not_current");
+  }
+  if (
+    message.includes("retryTurn requires a failed") ||
+    message.includes("resumeJob requires a failed") ||
+    message.includes("manual_retry requires")
+  ) {
+    return conflict("Job is not in a recoverable state", "job_not_recoverable");
+  }
+  const lowerMessage = message.toLowerCase();
+  if (lowerMessage.includes("not found") || lowerMessage.includes("no such job")) {
     return notFound("Job not found");
   }
 
@@ -1884,6 +2171,18 @@ function toJson(value: unknown): string {
 
 function exportFilename(jobId: string, extension: string): string {
   return `${safeFilenameBase(jobId)}.${extension}`;
+}
+
+/**
+ * The JSONL download keeps the job identifier in the filename so operators
+ * can correlate exports. Printable ASCII is preserved; anything outside it is
+ * replaced so the response header value stays valid.
+ */
+function jsonlExportFilename(jobId: string): string {
+  const headerSafe = jobId
+    .replace(/[^\x20-\x7e]/g, "_")
+    .slice(0, 96);
+  return `${headerSafe}-export.jsonl`;
 }
 
 function safeFilenameBase(jobId: string): string {

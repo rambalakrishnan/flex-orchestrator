@@ -22,35 +22,159 @@
         </p>
         <p>
           <label for="job-model">Model</label>
-          <select id="job-model" name="model">
-            <option value="gpt-5">GPT-5</option>
-            <option value="gpt-5-mini">GPT-5 Mini</option>
-            <option value="gpt-5-nano">GPT-5 Nano</option>
-            <option value="o3">o3</option>
-            <option value="o4-mini">o4-mini</option>
+          <input
+            id="job-model"
+            name="model"
+            type="text"
+            list="model-options"
+            value="gpt-6-astra"
+            required
+          />
+          <datalist id="model-options">
+            <option value="gpt-6-astra"></option>
+            <option value="gpt-6.1-sol"></option>
+            <option value="gpt-6.1-terra"></option>
+            <option value="gpt-6-luna"></option>
+          </datalist>
+        </p>
+        <p>
+          <label for="job-reasoning">Reasoning effort</label>
+          <select id="job-reasoning" name="reasoningEffort">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="xhigh">Extra high</option>
+            <option value="max">Max</option>
           </select>
         </p>
         <p>
-          <label for="job-prompt">Prompt</label>
-          <textarea id="job-prompt" name="prompt" required></textarea>
-        </p>
-        <p>
           <label for="job-max-output-tokens">Max output tokens</label>
-          <input id="job-max-output-tokens" name="maxOutputTokens" type="number" value="32768" min="1" />
+          <input
+            id="job-max-output-tokens"
+            name="maxOutputTokens"
+            type="number"
+            min="1"
+            step="1"
+            value="128000"
+            required
+          />
         </p>
         <p>
           <label for="job-cache-ttl">Cache TTL</label>
           <select id="job-cache-ttl" name="cacheTtl">
-            <option value="30m">30 minutes</option>
             <option value="12h" selected>12 hours</option>
+            <option value="30m">30 minutes</option>
             <option value="24h">24 hours</option>
             <option value="nocache">No cache</option>
           </select>
         </p>
         <p>
-          <label for="job-web-search">Web search</label>
           <input id="job-web-search" name="webSearch" type="checkbox" />
+          <label for="job-web-search">Web search</label>
         </p>
+
+        <fieldset>
+          <legend>Developer context</legend>
+          <p>
+            <label for="developer-prompt">Developer prompt</label>
+            <textarea id="developer-prompt" name="developerPrompt"></textarea>
+          </p>
+          <p>
+            <label for="developer-files">Developer files</label>
+            <input id="developer-files" type="file" multiple />
+          </p>
+          <p>
+            <button id="count-tokens" type="button">Count Tokens</button>
+          </p>
+          <p id="token-preview" role="status"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Turns</legend>
+          <div id="turns">
+            <div class="turn-block" data-turn-index="1">
+              <div class="turn-block-header">
+                <span class="turn-block-title">Turn 1</span>
+                <button type="button" class="turn-remove btn-ghost btn-sm">Remove turn</button>
+              </div>
+              <p>
+                <label for="turn-1-prompt">Prompt</label>
+                <textarea id="turn-1-prompt" class="turn-prompt"></textarea>
+              </p>
+              <p>
+                <label for="turn-1-files">Turn files</label>
+                <input id="turn-1-files" class="turn-files" type="file" multiple />
+              </p>
+            </div>
+          </div>
+          <template id="turn-template">
+            <div class="turn-block" data-turn-index="0">
+              <div class="turn-block-header">
+                <span class="turn-block-title">Turn</span>
+                <button type="button" class="turn-remove btn-ghost btn-sm">Remove turn</button>
+              </div>
+              <p>
+                <label for="turn-template-prompt">Prompt</label>
+                <textarea id="turn-template-prompt" class="turn-prompt"></textarea>
+              </p>
+              <p>
+                <label for="turn-template-files">Turn files</label>
+                <input id="turn-template-files" class="turn-files" type="file" multiple />
+              </p>
+            </div>
+          </template>
+          <p>
+            <button id="add-turn" type="button">Add turn</button>
+          </p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Judge</legend>
+          <p>
+            <input id="judge-enabled" type="checkbox" />
+            <label for="judge-enabled">Enable judge</label>
+          </p>
+          <div id="judge-panel" hidden aria-disabled="true">
+            <p>
+              <label for="judge-model">Judge model</label>
+              <input id="judge-model" name="judgeModel" type="text" value="gpt-6.1-sol" />
+            </p>
+            <p>
+              <label for="judge-secret">Judge secret name</label>
+              <input id="judge-secret" name="judgeSecret" type="text" value="OPENROUTER_API_KEY" />
+            </p>
+            <p class="radio-group">
+              <span class="group-label">Transport</span>
+              <label><input type="radio" name="judge-transport" value="responses" checked /> Responses</label>
+              <label><input type="radio" name="judge-transport" value="chat_completions" /> Completions</label>
+            </p>
+            <p class="radio-group">
+              <span class="group-label">History</span>
+              <label><input type="radio" name="judge-history" value="stateless" checked /> Stateless</label>
+              <label><input type="radio" name="judge-history" value="chained" /> Chained</label>
+            </p>
+            <p class="radio-group">
+              <span class="group-label">File delivery</span>
+              <label><input type="radio" name="judge-file-delivery" value="passthrough" checked /> Passthrough</label>
+              <label><input type="radio" name="judge-file-delivery" value="inline" /> Inline</label>
+            </p>
+            <p>
+              <label for="judge-prompt">Judge developer prompt</label>
+              <textarea id="judge-prompt" name="judgePrompt"></textarea>
+            </p>
+            <p>
+              <label for="judge-grade">Max passing grade</label>
+              <select id="judge-grade" name="judgeGrade">
+                <option value="A" selected>A</option>
+                <option value="B">B</option>
+                <option value="C">C</option>
+                <option value="D">D</option>
+                <option value="F">F</option>
+              </select>
+            </p>
+          </div>
+        </fieldset>
+
         <p>
           <button type="submit">Create Job</button>
         </p>

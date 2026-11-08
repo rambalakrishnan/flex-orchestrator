@@ -56,6 +56,16 @@ export const PRIOR_ACCEPTED_TURNS: readonly PriorAcceptedTurn[] = [
   },
 ];
 
+/** Developer prompt used by the developer-context fixture. */
+export const DEVELOPER_PROMPT_TEXT =
+  "Follow the house style guide: present tense, third person, no headings.";
+
+/** Developer file IDs used by the developer-context fixture. */
+export const DEVELOPER_FILE_IDS: readonly FileId[] = [
+  "file_style_guide",
+  "file_world_bible",
+];
+
 /** Builds the canonical generation-request params every fixture derives from. */
 export function baseGenerationRequestParams(
   overrides: Partial<CanonicalGenerationRequestParams> = {},
@@ -74,6 +84,8 @@ export function baseGenerationRequestParams(
     promptText: BASE_PROMPT_TEXT,
     attachmentFileIds: [],
     previousResponseId: null,
+    developerPrompt: "",
+    developerFileIds: [],
     ...overrides,
   };
 }
@@ -133,6 +145,17 @@ export function fileAttachmentGenerationRequestParams(
   overrides: Partial<CanonicalGenerationRequestParams> = {},
 ): CanonicalGenerationRequestParams {
   return baseGenerationRequestParams({ attachmentFileIds: fileIds, ...overrides });
+}
+
+/** Params carrying job developer context (prompt plus two developer files). */
+export function developerContextGenerationRequestParams(
+  overrides: Partial<CanonicalGenerationRequestParams> = {},
+): CanonicalGenerationRequestParams {
+  return baseGenerationRequestParams({
+    developerPrompt: DEVELOPER_PROMPT_TEXT,
+    developerFileIds: DEVELOPER_FILE_IDS,
+    ...overrides,
+  });
 }
 
 /**

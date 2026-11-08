@@ -84,6 +84,10 @@ export interface BuildGenerationInputParams {
   readonly attemptKind: GenerationAttemptKind;
   readonly previousResponseId: ResponseId | null;
   readonly priorAcceptedTurns?: readonly PriorAcceptedTurn[];
+  /** Job developer context placed in the developer message after the instruction. */
+  readonly developerPrompt?: string;
+  /** Developer files attached to that same developer message on every attempt. */
+  readonly developerFileIds?: readonly FileId[];
 }
 
 export type GenerationInputItem = Readonly<Record<string, unknown>>;
@@ -91,12 +95,16 @@ export type GenerationInputItem = Readonly<Record<string, unknown>>;
 /**
  * Builds the canonical Responses `input` array.
  *
- * - Developer instruction is a `developer` message inside `input`.
+ * - Developer instruction is a `developer` message inside `input`; the job
+ *   developer prompt and developer files are appended to that same message
+ *   (instruction first, then the prompt block, then one `input_file` item per
+ *   deduplicated developer file ID).
  * - Prior accepted turns are replayed as `assistant` messages only when the
  *   request is unanchored (`previousResponseId === null`); an anchored request
  *   inherits that context through `previous_response_id`.
  * - The current turn is one `user` message containing its prompt text followed
- *   by one `input_file` content item per attached file ID.
+ *   by one `input_file` content item per attached file ID. Turn attachments
+ *   never merge with the developer files.
  * - Continuation attempts append a continuation directive to that user message
  *   instead of restating the prompt.
  */
@@ -105,11 +113,29 @@ export function buildGenerationInput(
 ): readonly GenerationInputItem[] {
   assertTurnIndex(params.turnIndex, "buildGenerationInput");
 
+  const developerContent: Record<string, unknown>[] = [
+    { type: "input_text", text: buildDeveloperInstruction(params.turnIndex) },
+  ];
+
+  const developerPrompt = params.developerPrompt;
+  if (developerPrompt !== undefined && developerPrompt.trim().length > 0) {
+    developerContent.push({ type: "input_text", text: developerPrompt });
+  }
+
+  const seenDeveloperFileIds = new Set<FileId>();
+  for (const fileId of params.developerFileIds ?? []) {
+    if (fileId.length === 0 || seenDeveloperFileIds.has(fileId)) {
+      continue;
+    }
+    seenDeveloperFileIds.add(fileId);
+    developerContent.push({ type: "input_file", file_id: fileId });
+  }
+
   const items: GenerationInputItem[] = [
     {
       type: "message",
       role: "developer",
-      content: [{ type: "input_text", text: buildDeveloperInstruction(params.turnIndex) }],
+      content: developerContent,
     },
   ];
 
@@ -164,6 +190,8 @@ export interface CanonicalGenerationRequestParams {
   readonly attachmentFileIds: readonly FileId[];
   readonly previousResponseId: ResponseId | null;
   readonly priorAcceptedTurns?: readonly PriorAcceptedTurn[];
+  readonly developerPrompt?: string;
+  readonly developerFileIds?: readonly FileId[];
 }
 
 export interface CanonicalGenerationRequest {
@@ -210,6 +238,8 @@ export function buildCanonicalGenerationRequest(
     attemptKind: params.attemptKind,
     previousResponseId: params.previousResponseId,
     priorAcceptedTurns: params.priorAcceptedTurns,
+    developerPrompt: params.developerPrompt,
+    developerFileIds: params.developerFileIds,
   });
 
   const requestObject: Record<string, unknown> = {

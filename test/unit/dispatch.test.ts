@@ -12,6 +12,7 @@ import {
   COMPLETION_MARKER_FORMAT,
   applyRetryAfter,
   buildCanonicalGenerationRequest,
+  buildDeveloperInstruction,
   buildGenerationIdempotencyKey,
   buildGenerationInput,
   classifyDispatchResult,
@@ -28,11 +29,14 @@ import {
   BASE_PROMPT_TEXT,
   BASE_TURN_INDEX,
   CANONICAL_ATTACHMENT_FILE_IDS,
+  DEVELOPER_FILE_IDS,
+  DEVELOPER_PROMPT_TEXT,
   PRIOR_ACCEPTED_TURNS,
   anchoredGenerationRequestParams,
   baseGenerationRequestParams,
   cacheGenerationRequestParams,
   continuationGenerationRequestParams,
+  developerContextGenerationRequestParams,
   fileAttachmentGenerationRequestParams,
   parseBody,
   priorAcceptedTurnsGenerationRequestParams,
@@ -276,6 +280,143 @@ describe("canonical generation request body (§7)", () => {
       expect(lowered).not.toContain("api_key");
       expect(lowered).not.toContain("api-key");
     }
+  });
+});
+
+describe("developer context in the developer message (§6)", () => {
+  const DEVELOPER_INSTRUCTION = buildDeveloperInstruction(BASE_TURN_INDEX);
+
+  function developerContentOf(params: Parameters<typeof buildCanonicalGenerationRequest>[0]) {
+    const { body } = requestBodyOf(params);
+    const input = asItems(body.input, "input");
+    const developer = asRecord(input[0], "input[0]");
+    return { input, developer, content: asItems(developer.content, "developer.content") };
+  }
+
+  it("appends the developer prompt then developer files to the instruction in order", () => {
+    const { content, input } = developerContentOf(developerContextGenerationRequestParams());
+
+    expect(content).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
+      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+    ]);
+    expect(content.map((item) => item.type)).toEqual([
+      "input_text",
+      "input_text",
+      "input_file",
+      "input_file",
+    ]);
+
+    const user = asRecord(input[input.length - 1], "user");
+    expect(asItems(user.content, "user.content")).toEqual([
+      { type: "input_text", text: BASE_PROMPT_TEXT },
+    ]);
+  });
+
+  it("serializes the developer context on initial and continuation attempts alike", () => {
+    const initial = developerContentOf(developerContextGenerationRequestParams());
+    expect(initial.content).toHaveLength(4);
+
+    const continuation = developerContentOf(
+      developerContextGenerationRequestParams({
+        attemptKind: "continuation",
+        continuationIndex: 1,
+        previousResponseId: ANCHOR_RESPONSE_ID,
+      }),
+    );
+    expect(continuation.content).toEqual(initial.content);
+    expect(continuation.content[0]).toEqual({
+      type: "input_text",
+      text: DEVELOPER_INSTRUCTION,
+    });
+    expect(continuation.content[1]).toEqual({
+      type: "input_text",
+      text: DEVELOPER_PROMPT_TEXT,
+    });
+
+    const user = asRecord(
+      continuation.input[continuation.input.length - 1],
+      "user",
+    );
+    const userContent = asItems(user.content, "user.content");
+    expect(userContent[0]).toEqual({
+      type: "input_text",
+      text: expect.stringContaining("Continue turn"),
+    });
+    expect(userContent.filter((item) => item.type === "input_file")).toHaveLength(0);
+    expect(continuation.content.filter((item) => item.type === "input_file")).toHaveLength(
+      DEVELOPER_FILE_IDS.length,
+    );
+  });
+
+  it("adds no extra developer blocks for empty or whitespace-only developer context", () => {
+    for (const params of [
+      baseGenerationRequestParams(),
+      baseGenerationRequestParams({ developerFileIds: [] }),
+      baseGenerationRequestParams({ developerPrompt: "   \n\t " }),
+      baseGenerationRequestParams({ developerPrompt: "   ", developerFileIds: [""] }),
+    ]) {
+      const { content } = developerContentOf(params);
+      expect(content).toEqual([{ type: "input_text", text: DEVELOPER_INSTRUCTION }]);
+    }
+  });
+
+  it("deduplicates developer file ids in order", () => {
+    const { content } = developerContentOf(
+      baseGenerationRequestParams({
+        developerPrompt: DEVELOPER_PROMPT_TEXT,
+        developerFileIds: [
+          "file_style_guide",
+          "file_style_guide",
+          "",
+          "file_world_bible",
+          "file_style_guide",
+        ],
+      }),
+    );
+
+    expect(content).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
+      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+    ]);
+  });
+
+  it("keeps turn attachments on the user message without merging developer files", () => {
+    const { content, input } = developerContentOf(
+      developerContextGenerationRequestParams({
+        attachmentFileIds: CANONICAL_ATTACHMENT_FILE_IDS,
+      }),
+    );
+
+    expect(content.filter((item) => item.type === "input_file")).toEqual([
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+    ]);
+
+    const user = asRecord(input[input.length - 1], "user");
+    expect(asItems(user.content, "user.content")).toEqual([
+      { type: "input_text", text: BASE_PROMPT_TEXT },
+      ...CANONICAL_ATTACHMENT_FILE_IDS.map((fileId) => ({
+        type: "input_file",
+        file_id: fileId,
+      })),
+    ]);
+  });
+
+  it("carries the developer context in the serialized request bytes", () => {
+    const request = buildCanonicalGenerationRequest(
+      developerContextGenerationRequestParams(),
+    );
+    const serialized = utf8Decoder.decode(request.requestBytes);
+
+    expect(serialized).toBe(request.requestBody);
+    expect(serialized).toContain(DEVELOPER_PROMPT_TEXT);
+    expect(serialized).toContain("file_style_guide");
+    expect(serialized).toContain("file_world_bible");
   });
 });
 

@@ -2271,6 +2271,42 @@ body > header > #health-check {
   box-shadow: var(--inset-highlight);
 }
 
+.dialog-jsonl {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  background: rgba(8, 10, 16, 0.42);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--inset-highlight);
+}
+
+.dialog-jsonl[data-state="ok"] {
+  border-left-color: var(--success);
+}
+
+.dialog-jsonl[data-state="error"] {
+  border-left-color: var(--danger);
+}
+
+.dialog-jsonl :is(h3, .dialog-jsonl-title) {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.dialog-jsonl p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .dialog-health:empty,
 .dialog-health[hidden] {
   display: none;

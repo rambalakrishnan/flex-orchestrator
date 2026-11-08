@@ -474,6 +474,7 @@ describe("operator API fragment recovery and guard regressions", () => {
     expect(html).toContain("Resume Job");
     expect(html).toContain("Retry Turn");
     expect(html).toContain("Download JSONL");
+    expect(html).toContain("Inspect JSONL");
     expect(html).toContain('<code class="job-error-code">invalid_request_error</code>');
 
     expect(html).not.toContain("<img src=x");

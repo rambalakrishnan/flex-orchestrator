@@ -594,9 +594,11 @@ async function refreshDetailFragment(jobId, silent) {
       const fragment = await response.text();
       if (detailJobId !== jobId) return;
       const healthRegion = dialogBody.querySelector(".dialog-health");
+      const jsonlRegion = dialogBody.querySelector(".dialog-jsonl");
       const actionError = dialogBody.querySelector(".dialog-action-error");
       dialogBody.innerHTML = fragment;
       if (healthRegion instanceof HTMLElement) dialogBody.appendChild(healthRegion);
+      if (jsonlRegion instanceof HTMLElement) dialogBody.appendChild(jsonlRegion);
       if (actionError instanceof HTMLElement) dialogBody.prepend(actionError);
       return;
     }
@@ -776,10 +778,111 @@ function showDialogActionError(message) {
   region.textContent = "Error: " + message;
 }
 
+/**
+ * Parses an NDJSON export line-by-line. Blank lines are ignored; a malformed or
+ * non-object line fails with its 1-based source line so operators can find the
+ * exact record. This is the client-side counterpart of the streaming export.
+ */
+function parseJsonl(text) {
+  const records = [];
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line.length === 0) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      throw new Error("Invalid JSONL at line " + (index + 1) + ".");
+    }
+    if (record === null || typeof record !== "object" || Array.isArray(record)) {
+      throw new Error("JSONL line " + (index + 1) + " is not an object.");
+    }
+    records.push(record);
+  }
+  return records;
+}
+
+function ensureJsonlRegion() {
+  const existing = dialogBody.querySelector(".dialog-jsonl");
+  if (existing instanceof HTMLElement) {
+    existing.hidden = false;
+    return existing;
+  }
+  const region = document.createElement("section");
+  region.className = "dialog-jsonl";
+  region.setAttribute("role", "status");
+  region.setAttribute("aria-live", "polite");
+  dialogBody.appendChild(region);
+  return region;
+}
+
+function renderJsonlSummary(region, records) {
+  const counts = new Map();
+  let incomplete = false;
+  for (const record of records) {
+    const type = typeof record.type === "string" ? record.type : "unknown";
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+    if (type === "export_incomplete") incomplete = true;
+  }
+
+  const title = document.createElement("h3");
+  title.className = "dialog-jsonl-title";
+  title.textContent = "JSONL records";
+  const lines = [];
+  for (const type of [
+    "job",
+    "turn",
+    "attempt",
+    "judge_call",
+    "export_incomplete",
+  ]) {
+    const count = counts.get(type);
+    if (count !== undefined) lines.push(type + ": " + count);
+  }
+  const total = document.createElement("p");
+  total.textContent = "Total records: " + records.length + (lines.length > 0 ? " — " + lines.join(", ") : "");
+  const body = [title, total];
+  if (incomplete) {
+    const warning = document.createElement("p");
+    warning.className = "error-text";
+    warning.textContent = "This stream ended with an export_incomplete marker; records are missing.";
+    body.push(warning);
+  }
+  region.replaceChildren(...body);
+  region.dataset.state = incomplete ? "error" : "ok";
+}
+
+async function runJsonlInspect(jobId) {
+  const region = ensureJsonlRegion();
+  region.dataset.state = "";
+  region.textContent = "Loading JSONL\u2026";
+  try {
+    const response = await fetch(
+      "/api/jobs/" + encodeURIComponent(jobId) + "/export/jsonl",
+    );
+    if (!response.ok) {
+      region.textContent = "Error: " + (await errorMessage(response));
+      region.dataset.state = "error";
+      return;
+    }
+    const records = parseJsonl(await response.text());
+    renderJsonlSummary(region, records);
+  } catch (error) {
+    region.textContent = "Error: " + describeError(error);
+    region.dataset.state = "error";
+  }
+}
+
 async function handleDialogAction(control) {
   if (!(control instanceof HTMLElement)) return;
   const action = control.getAttribute("data-action");
-  if (action !== "resume-job" && action !== "retry-turn" && action !== "check-health") {
+  if (
+    action !== "resume-job" &&
+    action !== "retry-turn" &&
+    action !== "check-health" &&
+    action !== "inspect-jsonl"
+  ) {
     return;
   }
   if (dialogActionRunning) return;
@@ -801,6 +904,10 @@ async function handleDialogAction(control) {
   try {
     if (action === "check-health") {
       await runDialogHealthCheck(jobId);
+      return;
+    }
+    if (action === "inspect-jsonl") {
+      await runJsonlInspect(jobId);
       return;
     }
 

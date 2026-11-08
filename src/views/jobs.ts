@@ -235,6 +235,10 @@ function renderJsonlDownloadLink(jobId: string): string {
   return `<a class="download-jsonl" href="/api/jobs/${escapeHtml(encodeURIComponent(jobId))}/export/jsonl" download>Download JSONL</a>`;
 }
 
+function renderJsonlInspectButton(jobId: string): string {
+  return `<button type="button" class="action-button" data-action="inspect-jsonl" data-job-id="${escapeHtml(jobId)}">Inspect JSONL</button>`;
+}
+
 interface AttemptProviderError {
   readonly code: string | null;
   readonly message: string | null;
@@ -586,6 +590,7 @@ export function renderJobDetail(
       : "",
     renderCheckHealthButton(job.job.jobId),
     renderJsonlDownloadLink(job.job.jobId),
+    renderJsonlInspectButton(job.job.jobId),
     downloadFinal,
   ].join("");
 

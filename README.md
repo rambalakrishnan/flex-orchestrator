@@ -120,11 +120,13 @@ The Worker treats `HOOKS_HOST` as the public webhook ingress and every other rea
 3. Set generation controls: reasoning effort, maximum output tokens, cache selection, and optional web search.
    - Cache selection is explicit among `30m`, `12h`, and `nocache`. The retired `24h` retention option is not accepted; legacy persisted rows are read as `12h`.
 4. Upload attachments. Client-submitted generation attachments use Files API uploads and returned `file_id` references.
-5. Declare the judge’s transport, history mode, file-delivery mode, and model; or disable the judge.
-6. Start the job.
+5. Configure the judge: Base URL (OpenAI/OpenRouter datalist), model, API-key env var name, transport, history mode, file-delivery mode, minimum acceptable grade, and the two steering toggles; or disable the judge.
+   - **Inject Critique on Failure** (default on): a judge failure retries the turn with `### JUDGE CRITIQUE` appended to the prompt.
+   - **Steer Next Turn on Pass** (default off): a passing judge comment is appended to the next pending turn as `### PM STEERING NOTE`.
+6. Start the job. Accepted turns auto-advance; capped/incomplete and missed-tag turns auto-continue within the fixed budgets.
 
 Token counting:
-- **Count Tokens** previews the developer context and every turn in parallel, with projected input tokens and admission per line.
+- Each turn card has its own **Count Tokens** button; the preview includes that turn plus the developer context and reports projected input tokens and admission inline.
 - After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value.
 
 Generation uses Flex background Responses and never falls back to standard tier.
@@ -136,6 +138,7 @@ Generation uses Flex background Responses and never falls back to standard tier.
 - Branch initialization consumes a complete snapshot in one local transaction. Branch activation follows file protection and conditional superseding of the quiescent parent. Branch snapshots are bounded to 8,000,000 encoded bytes.
 - Exports remain available in every job state and stream pages and one artifact at a time.
   - **Markdown:** accepted deliverables only, with the included turn range and status.
+  - **Final Markdown:** `GET /api/jobs/:id/export/markdown` concatenates accepted deliverables with turn markers stripped; completed jobs show a **Download Final Markdown** button.
   - **JSON:** retained definitions, attempts, judge calls, usage, provenance, diagnostics, file IDs, and missing-artifact markers.
   - JSON exports include encoded file bytes only when those bytes occur in a retained inline judge request. Exports do not fetch source files or attach a separate copy of their contents. Credentials are never exported.
   - A live JSON export is a versioned observation, not an atomic database backup.
@@ -159,8 +162,8 @@ The judge panel defaults to stateless history, and saved jobs carry explicit his
 - Stateless judge requests include files for the turns represented in their explicit context, attached to those turns’ content. `includePrior` adds prior accepted-output blocks and their applicable files. Files are deduplicated within each request.
 - The manifest covers all applicable files and distinguishes delivered-now, inherited, and withheld files.
 - Boolean `file_visibility` reports complete applicable-file coverage versus any missing coverage.
-- Judge output contains exactly verdict, grade, comment, tag agreement, and boolean file visibility.
-- Judge feedback never enters generation input automatically.
+- Judge output accepts the steering-shaped JSON (verdict `YES`/`NO`, letter grade `A`–`F`, comment, `tag_matches_expected_step`, boolean `file_visibility`) and normalizes it to the validated five-field record; legacy `PASS`/`FAIL`, numeric grades, and `tag_agreement` remain accepted.
+- Judge feedback enters generation only through the declared toggles: an on-failure critique retry or an on-pass steering note appended to the next pending turn prompt. With both off, feedback never reaches generation input.
 
 ## Files and Limits
 

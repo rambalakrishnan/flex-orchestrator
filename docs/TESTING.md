@@ -192,7 +192,7 @@ Cover: `src/lib/dispatch.ts`, `src/db/attempts.ts`.
 - Cancellation observed alongside text → cancellation path; not `empty_output`; judge not invoked
 Cover: `src/lib/tag.ts`, `src/do/job-do.ts`.
 
-**10. Recovery budgets and dispatch fences.** Automatic recovery budgets are fixed at job creation, cumulative per turn, and default to three continuations and one full retry. Manual retries do not reset automatic counters. Ambiguous dispatches pause for a fresh attempt and idempotency key. Flex backoff is persisted and bounded to five sends per attempt; assert exactly five sends then pause. Fallback polling follows the five-minute, one-minute, five-minute schedule with a 24-probe bound; drive each step with `runDurableObjectAlarm` against persisted deadlines. Attempt indices increase monotonically and are never reused.
+**10. Recovery budgets and dispatch fences.** Automatic recovery budgets are fixed at job creation, cumulative per turn, and default to three continuations and one full retry. Manual retries do not reset automatic counters. Ambiguous dispatches pause for a fresh attempt and idempotency key. Flex backoff is persisted and bounded to five sends per attempt; assert exactly five sends then pause. Capped/incomplete responses and `missed_tag` candidates auto-continue within the fixed continuation budget. Fallback polling follows the five-minute, one-minute, five-minute schedule with a 24-probe bound; drive each step with `runDurableObjectAlarm` against persisted deadlines. Attempt indices increase monotonically and are never reused.
 *Integration loop:* Mock the OpenAI client to return a marker-only response on attempt 1, and a valid response on attempt 2. Assert the run reaches the configured maximum limit (defaulting to three continuations and one full retry) and either completes or fails at the boundary without exceeding the ceiling.
 *(Note: This test belongs in `test/integration/generation-recovery.test.ts`)*
 Cover: `src/lib/dispatch.ts`, `src/lib/alarm.ts`, `src/db/attempts.ts`.
@@ -214,13 +214,13 @@ Cover: `src/lib/judge.ts`.
 
 **13. Manifest and `file_visibility`.** The manifest distinguishes delivered-now, inherited, and withheld files across all applicable files. Boolean `file_visibility` reports complete applicable-file coverage versus any missing coverage. Assert `file_visibility` is derived from coverage, not from `manifest.deliveredNow`. Cover: `src/lib/judge.ts`.
 
-**14. Judge output shape.** Judge output validation accepts exactly verdict, grade, comment, tag agreement, and boolean file visibility — nothing else. Explicitly test the validation parser by passing JSON with 4 fields, 6 fields, extra properties, and wrong types. Assert the parser rejects them before they hit the database. Cover: `src/lib/judge.ts`.
+**14. Judge output shape.** Judge output validation accepts exactly the five-field steering shape: verdict (`YES`/`NO`), letter grade (`A`–`F`), comment, `tag_matches_expected_step`, and boolean `file_visibility`; it normalizes to `PASS`/`FAIL`, numeric grade (A=95,B=85,C=75,D=65,F=50), and `tag_agreement`. Legacy `PASS`/`FAIL`, numeric grades, and `tag_agreement` are also accepted; mixed/extra/missing keys and wrong types are rejected before the database. Cover: `src/lib/judge.ts`.
 
 **15. Judge audit records.** Audit records retain the request, extracted message body, IDs, usage, diagnostics, and required continuity items, and not a redundant response envelope. Judge history and response IDs remain separate from generation history. Cover: `src/db/attempts.ts`, `src/lib/judge.ts`.
 
-**16. Judge outcome branching.** Judge infrastructure failure accepts an otherwise valid candidate with a warning. Valid rejection, excessive grade, or judge-only tag disagreement pauses a structurally valid candidate for review; judge-only tag disagreement is distinct from parser-confirmed `wrong_index`. Incomplete file visibility on an otherwise passing result accepts with a coverage warning. Storage and artifact-guard errors pause or fail explicitly. Accept-with-warning uses the ordinary acceptance transition and preserves the original judge result. Operator acceptance does not bypass structural validity, admission, refusal handling, or artifact guards. Cover: `src/do/job-do.ts`, `src/lib/judge.ts`, `src/handlers/jobs.ts`.
+**16. Judge outcome branching.** Judge infrastructure failure accepts an otherwise valid candidate with a warning. A judge rejection or grade below the minimum acceptable threshold consumes the automatic retry budget: when `injectOnFail` is true the retry prompt carries the judge critique; with the flag off the retry is unmodified. Once the budget is exhausted the job pauses for review. Judge-only tag disagreement pauses a structurally valid candidate; it is distinct from parser-confirmed `wrong_index`. Incomplete file visibility on an otherwise passing result accepts with a coverage warning. Storage and artifact-guard errors pause or fail explicitly. Accept-with-warning uses the ordinary acceptance transition and preserves the original judge result. Operator acceptance does not bypass structural validity, admission, refusal handling, or artifact guards. Cover: `src/do/job-do.ts`, `src/lib/judge.ts`, `src/handlers/jobs.ts`.
 
-**17. Judge feedback isolation.** Judge feedback never enters generation input automatically. Assert this by constructing the next generation request after a judge rejection and diffing it against a request built without any judge interaction; the judge text must not appear. Cover: `src/do/job-do.ts` plus canonical-request builder assertions.
+**17. Conditional judge feedback injection.** Judge feedback enters generation only when declared. With `injectOnFail` false, a failed-turn retry request must not contain the judge comment. With it true, the stored turn prompt and auto-retry request contain the exact `### JUDGE CRITIQUE` suffix. With `injectOnPass` true, the next pending turn prompt is updated with the exact `### PM STEERING NOTE` suffix before dispatch; with it false the next prompt is unchanged. Config booleans default to `true`/`false` for legacy persisted judge JSON. Cover: `src/do/job-do.ts`, `src/db/turns.ts`, `src/lib/judge.ts`.
 
 ### Webhooks
 **18. Webhook durability, ordering, and signature concatenation.** Signature verification operates on exact raw bytes with a 300-second delivery-timestamp tolerance. Acknowledgement follows durable inbox acceptance. Response mappings are immutable; unmatched events remain available for registration races. Duplicate and late results retain usable accounting observations without reopening settled execution decisions.
@@ -310,6 +310,10 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] A declared OpenAI stateful passthrough judge accepts a candidate without warning when capabilities align.
 - [ ] A declared Chat Completions stateful judge produces an advisory warning (not a substitution).
 - [ ] A judge infrastructure failure accepts with a warning; the original judge result is preserved.
+- [ ] A judge rejection with "Inject Critique on Failure" retries with the critique visible in the retry prompt; disabling it retries without the critique and the budget still bounds retries.
+- [ ] A passing judge with "Steer Next Turn on Pass" appends the PM steering note to the next turn prompt; disabling it leaves the next prompt unchanged.
+- [ ] Minimum Acceptable Grade uses A/B/C/D/F thresholds and the judge's letter grade is normalized for the decision.
+- [ ] Base URL selects the judge API root; an OpenRouter URL sends the OpenRouter root.
 - [ ] A judge that reports `file_visibility: false` on an otherwise passing result accepts with a coverage warning.
 - [ ] A judge-only tag disagreement pauses the candidate for review; parser-confirmed `wrong_index` handles separately.
 - [ ] A stateful judge whose first call failed before response-ID commit re-attaches the file on the retry.
@@ -325,6 +329,7 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] Copied history shows inherited provenance, not new branch spend.
 
 ### Exports
+- [ ] A completed job shows **Download Final Markdown**; the `.md` attachment concatenates accepted deliverables with `<!-- TURN_END:n -->` markers stripped.
 - [ ] A Markdown export captures the accepted-prefix boundary at export start; later acceptances do not appear.
 - [ ] A JSON export of a job with a retained inline judge request includes the encoded file bytes; a job with passthrough files does not.
 - [ ] A live JSON export reports starting revision and high-water keys; a record created after export start is excluded.

@@ -67,7 +67,7 @@ interface PreviewContext {
 
 /** Structural view of the `JobDO` binding RPC used by the preview. */
 interface JobDoRpcStub {
-  getState(): Promise<JobStateResponse>;
+  getState(): Promise<JobStateResponse | null>;
 }
 
 /**
@@ -279,6 +279,9 @@ async function resolvePreviewContext(
 
   const stub = env.JOB_DO.get(env.JOB_DO.idFromName(jobId)) as unknown as JobDoRpcStub;
   const state = await stub.getState();
+  if (state === null) {
+    throw new HttpError(404, "not_found", "Job not found");
+  }
   return {
     jobId,
     cacheTtl: state.job.config.cacheTtl,

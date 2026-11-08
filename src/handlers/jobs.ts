@@ -93,7 +93,7 @@ type BranchRejectionReason =
 /** Structural view of the `JobDO` binding RPC used by this handler. */
 interface JobDoRpcStub {
   createJob(command: CreateJobCommand): Promise<JobStateResponse>;
-  getState(): Promise<JobStateResponse>;
+  getState(): Promise<JobStateResponse | null>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
@@ -418,7 +418,11 @@ async function listJobs(env: Env, url: URL): Promise<Response> {
 async function getJobState(env: Env, jobId: JobId): Promise<Response> {
   const stub = getJobStub(env, jobId);
   try {
-    return jsonResponse(await stub.getState());
+    const state = await stub.getState();
+    if (state === null) {
+      return notFound("Job not found");
+    }
+    return jsonResponse(state);
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
@@ -502,7 +506,11 @@ async function exportMarkdown(env: Env, jobId: JobId): Promise<Response> {
   const stub = getJobStub(env, jobId);
   let state: JobStateResponse;
   try {
-    state = await stub.getState();
+    const loaded = await stub.getState();
+    if (loaded === null) {
+      return notFound("Job not found");
+    }
+    state = loaded;
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
@@ -523,7 +531,11 @@ async function exportJson(env: Env, jobId: JobId): Promise<Response> {
   let state: JobStateResponse;
   try {
     marks = await stub.captureExportHighWaterMarks();
-    state = await stub.getState();
+    const loaded = await stub.getState();
+    if (loaded === null) {
+      return notFound("Job not found");
+    }
+    state = loaded;
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }

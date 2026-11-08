@@ -54,9 +54,16 @@ import type {
   TurnIndex,
   TurnPromptSpec,
 } from "../types.ts";
+import { renderJobDetail, renderJobList } from "../views/jobs.ts";
+import type { JobDeliverable } from "../views/jobs.ts";
 
 const JOBS_PATH = "/api/jobs";
 const JOBS_PATH_PREFIX = `${JOBS_PATH}/`;
+const JOBS_FRAGMENT_PATH = `${JOBS_PATH}/fragment`;
+
+/** Detail fragments read accepted turns in fixed-size internal pages. */
+const FRAGMENT_TURN_PAGE_LIMIT = 100;
+const FRAGMENT_MAX_TURN_PAGES = 4;
 
 const EXPORT_PAGE_LIMIT = LIST_PAGE_LIMIT_MAX;
 
@@ -145,6 +152,14 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
     return methodNotAllowed(["GET", "POST"]);
   }
 
+  if (url.pathname === JOBS_FRAGMENT_PATH) {
+    if (method !== "GET") {
+      return methodNotAllowed(["GET"]);
+    }
+    rejectUnknownQuery(url, ["limit", "cursor"]);
+    return listJobsFragment(env, url);
+  }
+
   if (!url.pathname.startsWith(JOBS_PATH_PREFIX)) {
     return notFound();
   }
@@ -166,6 +181,12 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
   }
 
   switch (subpath[0]) {
+    case "fragment":
+      if (method !== "GET") {
+        return methodNotAllowed(["GET"]);
+      }
+      rejectUnknownQuery(url, []);
+      return getJobFragment(env, jobId);
     case "turns":
       if (method === "GET") {
         rejectUnknownQuery(url, ["limit", "cursor"]);
@@ -413,6 +434,97 @@ async function listJobs(env: Env, url: URL): Promise<Response> {
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
+}
+
+async function listJobsFragment(env: Env, url: URL): Promise<Response> {
+  const limit = readLimit(url);
+  const cursor = readCursor(url);
+  const request: CursorPageRequest =
+    cursor === null ? { limit } : { limit, cursor };
+  const registry = getRegistryStub(env);
+  try {
+    const page = await registry.listJobs(request);
+    return htmlFragmentResponse(renderJobList(page.items));
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+async function getJobFragment(env: Env, jobId: JobId): Promise<Response> {
+  const stub = getJobStub(env, jobId);
+  try {
+    const state = await stub.getState();
+    if (state === null) {
+      return notFound("Job not found");
+    }
+    const deliverables = await collectAcceptedDeliverables(stub);
+    return htmlFragmentResponse(renderJobDetail(state, deliverables));
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+/**
+ * Collects accepted turn deliverables for the detail fragment. Turn pages are
+ * read with an internal primary-key cursor and a fixed page cap, so a job with
+ * many historical turns cannot spin the request indefinitely.
+ */
+async function collectAcceptedDeliverables(
+  stub: JobDoRpcStub,
+): Promise<JobDeliverable[]> {
+  const deliverables: JobDeliverable[] = [];
+  let cursor: string | null = null;
+
+  for (let pageCount = 0; pageCount < FRAGMENT_MAX_TURN_PAGES; pageCount += 1) {
+    const request: CursorPageRequest =
+      cursor === null
+        ? { limit: FRAGMENT_TURN_PAGE_LIMIT }
+        : { limit: FRAGMENT_TURN_PAGE_LIMIT, cursor };
+    const page = await stub.listTurns(request);
+
+    for (const turn of page.items) {
+      if (
+        turn.status !== "accepted" &&
+        turn.status !== "accepted_with_warning"
+      ) {
+        continue;
+      }
+      const candidateId = turn.accepted_candidate_id;
+      if (candidateId === null) {
+        continue;
+      }
+      const artifact = await stub.readArtifact({
+        kind: "candidate_deliverable",
+        id: candidateId,
+      });
+      if (artifact === null) {
+        continue;
+      }
+      deliverables.push({
+        turnIndex: turn.turn_index,
+        status: turn.status,
+        text: decodeArtifactText(artifact.bytes),
+      });
+    }
+
+    if (!page.hasMore || page.nextCursor === null) {
+      break;
+    }
+    cursor = page.nextCursor;
+  }
+
+  return deliverables;
+}
+
+/** HTML fragments are never cached and never declare a JSON content type. */
+function htmlFragmentResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 async function getJobState(env: Env, jobId: JobId): Promise<Response> {

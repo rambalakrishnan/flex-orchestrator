@@ -10,10 +10,10 @@ const APP_ORIGIN = "https://app.test";
 const APP_HOST = "app.test";
 const HOOKS_HOST = "hooks.test";
 
-function createJobCommand(jobId: string): Record<string, unknown> {
+function createJobCommand(jobId: string, title = "Routing smoke job"): Record<string, unknown> {
   return {
     jobId,
-    title: "Routing smoke job",
+    title,
     config: {
       model: "gpt-5",
       reasoningEffort: "high",
@@ -30,13 +30,67 @@ function createJobCommand(jobId: string): Record<string, unknown> {
   };
 }
 
-async function postJob(jobId: string): Promise<Response> {
+async function postJob(jobId: string, title?: string): Promise<Response> {
   return mainWorker.fetch(`https://${APP_HOST}/api/jobs`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: APP_ORIGIN },
-    body: JSON.stringify(createJobCommand(jobId)),
+    body: JSON.stringify(createJobCommand(jobId, title)),
   });
 }
+
+describe("server-rendered fragments", () => {
+  it("serves the job list fragment as HTML", async () => {
+    const jobId = `job_fragment_list_${Date.now()}`;
+    expect((await postJob(jobId)).status).toBe(201);
+
+    const response = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/fragment`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const html = await response.text();
+    expect(html).toContain('class="job-card"');
+    expect(html).toContain(jobId);
+  });
+
+  it("serves the job-detail fragment and 404s missing jobs", async () => {
+    const jobId = `job_fragment_detail_${Date.now()}`;
+    expect((await postJob(jobId)).status).toBe(201);
+
+    const response = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/fragment`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    const html = await response.text();
+    expect(html).toContain("Routing smoke job");
+    expect(html).toContain(jobId);
+
+    const missing = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/job_missing_fragment/fragment`,
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  it("escapes untrusted job metadata in the server-rendered fragment", async () => {
+    const jobId = `job_fragment_escape_${Date.now()}`;
+    const hostileTitle = '<img src=x onerror="alert(1)">';
+    expect((await postJob(jobId, hostileTitle)).status).toBe(201);
+
+    const response = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/fragment`);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain("&lt;img");
+  });
+
+  it("serves static assets on non-API paths", async () => {
+    const css = await mainWorker.fetch(`https://${APP_HOST}/app.css`);
+    expect(css.status).toBe(200);
+    expect((await css.text()).length).toBeGreaterThan(0);
+
+    const javascript = await mainWorker.fetch(`https://${APP_HOST}/app.js`);
+    expect(javascript.status).toBe(200);
+    expect((await javascript.text()).length).toBeGreaterThan(0);
+  });
+});
 
 describe("worker hostname routing", () => {
   it("serves only POST /openai on the hooks host", async () => {

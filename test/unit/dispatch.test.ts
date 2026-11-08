@@ -29,7 +29,6 @@ import {
   BASE_PROMPT_TEXT,
   BASE_TURN_INDEX,
   CANONICAL_ATTACHMENT_FILE_IDS,
-  DEVELOPER_FILE_IDS,
   DEVELOPER_PROMPT_TEXT,
   PRIOR_ACCEPTED_TURNS,
   anchoredGenerationRequestParams,
@@ -293,31 +292,26 @@ describe("developer context in the developer message (§6)", () => {
     return { input, developer, content: asItems(developer.content, "developer.content") };
   }
 
-  it("appends the developer prompt then developer files to the instruction in order", () => {
+  it("keeps developer files out of the developer message and attaches them to the user message", () => {
     const { content, input } = developerContentOf(developerContextGenerationRequestParams());
 
     expect(content).toEqual([
       { type: "input_text", text: DEVELOPER_INSTRUCTION },
       { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
-      { type: "input_file", file_id: "file_style_guide" },
-      { type: "input_file", file_id: "file_world_bible" },
     ]);
-    expect(content.map((item) => item.type)).toEqual([
-      "input_text",
-      "input_text",
-      "input_file",
-      "input_file",
-    ]);
+    expect(content.map((item) => item.type)).toEqual(["input_text", "input_text"]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
       { type: "input_text", text: BASE_PROMPT_TEXT },
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
     ]);
   });
 
   it("serializes the developer context on initial and continuation attempts alike", () => {
     const initial = developerContentOf(developerContextGenerationRequestParams());
-    expect(initial.content).toHaveLength(4);
+    expect(initial.content).toHaveLength(2);
 
     const continuation = developerContentOf(
       developerContextGenerationRequestParams({
@@ -345,10 +339,10 @@ describe("developer context in the developer message (§6)", () => {
       type: "input_text",
       text: expect.stringContaining("Continue turn"),
     });
-    expect(userContent.filter((item) => item.type === "input_file")).toHaveLength(0);
-    expect(continuation.content.filter((item) => item.type === "input_file")).toHaveLength(
-      DEVELOPER_FILE_IDS.length,
-    );
+    expect(userContent.filter((item) => item.type === "input_file")).toEqual([
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+    ]);
   });
 
   it("adds no extra developer blocks for empty or whitespace-only developer context", () => {
@@ -363,8 +357,8 @@ describe("developer context in the developer message (§6)", () => {
     }
   });
 
-  it("deduplicates developer file ids in order", () => {
-    const { content } = developerContentOf(
+  it("deduplicates developer file ids in order on the user message", () => {
+    const { content, input } = developerContentOf(
       baseGenerationRequestParams({
         developerPrompt: DEVELOPER_PROMPT_TEXT,
         developerFileIds: [
@@ -380,30 +374,35 @@ describe("developer context in the developer message (§6)", () => {
     expect(content).toEqual([
       { type: "input_text", text: DEVELOPER_INSTRUCTION },
       { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
-      { type: "input_file", file_id: "file_style_guide" },
-      { type: "input_file", file_id: "file_world_bible" },
-    ]);
-  });
-
-  it("keeps turn attachments on the user message without merging developer files", () => {
-    const { content, input } = developerContentOf(
-      developerContextGenerationRequestParams({
-        attachmentFileIds: CANONICAL_ATTACHMENT_FILE_IDS,
-      }),
-    );
-
-    expect(content.filter((item) => item.type === "input_file")).toEqual([
-      { type: "input_file", file_id: "file_style_guide" },
-      { type: "input_file", file_id: "file_world_bible" },
     ]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
       { type: "input_text", text: BASE_PROMPT_TEXT },
-      ...CANONICAL_ATTACHMENT_FILE_IDS.map((fileId) => ({
-        type: "input_file",
-        file_id: fileId,
-      })),
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+    ]);
+  });
+
+  it("deduplicates developer and turn files together on the user message", () => {
+    const { content, input } = developerContentOf(
+      developerContextGenerationRequestParams({
+        attachmentFileIds: [
+          "file_style_guide",
+          "file_harbor_log",
+          "file_harbor_log",
+        ],
+      }),
+    );
+
+    expect(content.filter((item) => item.type === "input_file")).toHaveLength(0);
+
+    const user = asRecord(input[input.length - 1], "user");
+    expect(asItems(user.content, "user.content")).toEqual([
+      { type: "input_text", text: BASE_PROMPT_TEXT },
+      { type: "input_file", file_id: "file_style_guide" },
+      { type: "input_file", file_id: "file_world_bible" },
+      { type: "input_file", file_id: "file_harbor_log" },
     ]);
   });
 

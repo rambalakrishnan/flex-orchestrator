@@ -54,6 +54,8 @@ The remaining structural outcomes and the joint recovery procedure follow §8A.
 
 Source attachments are catalogued through the Files API with `purpose: "user_data"`. Generation references their catalogue file IDs; judge delivery follows §8.
 
+Developer-role messages are text-only. Developer files are delivered as `input_file` content in the user message, deduplicated against that turn's attachments, because the provider rejects file content inside developer messages.
+
 The upload limit is **16,000,000 file bytes**. Multipart parsing, buffering, and hashing remain bounded.
 
 Source file bytes are not stored in a separate SQLite file store or file-preparation cache. Server-constructed inline judge requests contain encoded file bytes, and those bytes are retained as part of the guarded canonical judge-request BLOB. Exporting that request also exports its encoded file bytes.

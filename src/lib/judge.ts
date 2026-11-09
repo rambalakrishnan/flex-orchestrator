@@ -120,6 +120,7 @@ export type JudgeRequestBuildOutcome =
     };
 
 const utf8Encoder = new TextEncoder();
+const utf8StrictDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 /**
  * Advisory warnings for declared contracts that cannot fully honor every
@@ -264,6 +265,46 @@ function buildJudgeFileContentItems(params: {
 }
 
 /**
+ * Encodes inline files for Chat Completions, which has no file-reference
+ * mechanism: each file becomes a fenced text part. Files without bytes or
+ * with non-UTF-8 bytes cannot be represented faithfully and are reported
+ * back for manifest withholding instead of being mangled or dropped
+ * silently.
+ */
+function buildChatFileContentItems(params: {
+  readonly files: readonly JudgeApplicableFile[];
+}): {
+  readonly items: readonly Record<string, unknown>[];
+  readonly withheldReasons: ReadonlyMap<FileId, string>;
+} {
+  const items: Record<string, unknown>[] = [];
+  const withheldReasons = new Map<FileId, string>();
+  for (const file of params.files) {
+    const bytes = file.bytes
+      ? file.bytes instanceof Uint8Array
+        ? file.bytes
+        : new Uint8Array(file.bytes)
+      : null;
+    if (bytes === null) {
+      withheldReasons.set(file.fileId, "inline_bytes_missing");
+      continue;
+    }
+    let text: string;
+    try {
+      text = utf8StrictDecoder.decode(bytes);
+    } catch {
+      withheldReasons.set(file.fileId, "inline_bytes_not_utf8");
+      continue;
+    }
+    items.push({
+      type: "text",
+      text: `<file name="${file.filename}">\n${text}\n</file>`,
+    });
+  }
+  return { items, withheldReasons };
+}
+
+/**
  * Builds a judge request for the declared transport, history, and file-delivery
  * modes. Returns an explicit unencodable outcome when the declaration cannot be
  * represented, rather than sending a stripped request.
@@ -314,13 +355,6 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
     toDeliver.push(file);
   }
 
-  const manifest = buildManifest({
-    applicableFiles: params.applicableFiles,
-    deliveredNow: deliveredNowIds,
-    effectiveHistory,
-    withheldReasons,
-  });
-
   const continuityAnchor =
     previousResponseId === null ? null : { previous_response_id: previousResponseId };
   const continuity =
@@ -338,8 +372,6 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
       ? `${trimmedDeveloperPrompt}\n\n${generatedInstruction}`
       : generatedInstruction;
 
-  const fileItems = buildJudgeFileContentItems({ config, files: toDeliver });
-
   const contextMessages: Record<string, unknown>[] = [];
   if (config.historyMode === "stateless" && config.includePrior) {
     for (const prior of params.priorAcceptedOutputs ?? []) {
@@ -353,10 +385,36 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
     }
   }
 
-  const userContent: Record<string, unknown>[] = [
-    { type: "input_text", text: params.candidateText },
-    ...fileItems,
-  ];
+  const manifestBase = {
+    applicableFiles: params.applicableFiles,
+    effectiveHistory,
+  };
+
+  let fileItems: readonly Record<string, unknown>[];
+  let userContent: Record<string, unknown>[];
+  let manifest: readonly JudgeFileManifestEntry[];
+  if (config.transport === "chat_completions") {
+    const chatFiles = buildChatFileContentItems({ files: toDeliver });
+    for (const [fileId, reason] of chatFiles.withheldReasons) {
+      withheldReasons.set(fileId, reason);
+      deliveredNowIds.delete(fileId);
+    }
+    fileItems = chatFiles.items;
+    userContent = [{ type: "text", text: params.candidateText }, ...fileItems];
+    manifest = buildManifest({
+      ...manifestBase,
+      deliveredNow: deliveredNowIds,
+      withheldReasons,
+    });
+  } else {
+    fileItems = buildJudgeFileContentItems({ config, files: toDeliver });
+    userContent = [{ type: "input_text", text: params.candidateText }, ...fileItems];
+    manifest = buildManifest({
+      ...manifestBase,
+      deliveredNow: deliveredNowIds,
+      withheldReasons,
+    });
+  }
 
   const idempotencyKey: IdempotencyKey = `${params.jobId}:j${params.turnIndex}:${params.judgeCallId}`;
 

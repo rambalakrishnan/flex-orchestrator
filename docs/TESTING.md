@@ -204,6 +204,7 @@ Cover: `src/lib/dispatch.ts`, `src/lib/alarm.ts`, `src/db/attempts.ts`.
 ### Judge
 **11. Declared-capability handling.** Judge capability declarations are operator-authoritative. The adapter performs no runtime capability detection and no silent substitution; inconsistencies produce advisory warnings; an unencodable declared contract produces `UNKNOWN` rather than an invented capability. Specifically:
 - Chat Completions declared stateful → warning; assert the outbound request contains no `previous_response_id` and no other invented stateful field.
+- Chat Completions user content uses `{type: "text"}` parts only: the candidate as a plain text part and inline UTF-8 files as fenced text parts; assert no `input_text`/`input_file` parts appear. Files without bytes or with non-UTF-8 bytes are withheld with an explicit manifest reason (`inline_bytes_missing` / `inline_bytes_not_utf8`), never mangled or sent empty.
 - Passthrough with a non-OpenAI API root → permitted.
 - Unencodable declared contract → `UNKNOWN`, **and** the request is not sent with the offending field dropped.
 Cover: `src/lib/judge.ts`.

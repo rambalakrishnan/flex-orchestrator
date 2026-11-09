@@ -218,6 +218,93 @@ describe("declared-capability handling (item 11)", () => {
   });
 });
 
+describe("Chat Completions content shape", () => {
+  function chatUserContent(body: string): readonly Record<string, unknown>[] {
+    const parsed = JSON.parse(body) as {
+      readonly messages: readonly {
+        readonly role: string;
+        readonly content: unknown;
+      }[];
+    };
+    const user = parsed.messages.find((message) => message.role === "user");
+    if (!user || !Array.isArray(user.content)) {
+      throw new Error("expected an array user content block");
+    }
+    return user.content as readonly Record<string, unknown>[];
+  }
+
+  it("encodes the candidate as a text part, never Responses-style parts", () => {
+    const built = expectBuilt(build(chatCompletionsJudge()));
+
+    expect(built.requestBody).not.toContain('"input_text"');
+    expect(built.requestBody).not.toContain('"input_file"');
+    expect(chatUserContent(built.requestBody)).toEqual([
+      { type: "text", text: "candidate deliverable text" },
+    ]);
+  });
+
+  it("embeds inline UTF-8 files as fenced text parts and marks them delivered", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge(), {
+        applicableFiles: [
+          applicableFile("file_a", {
+            filename: "notes.md",
+            bytes: new TextEncoder().encode("# Notes"),
+          }),
+        ],
+      }),
+    );
+
+    const parts = chatUserContent(built.requestBody);
+    expect(parts).toHaveLength(2);
+    expect(parts[1]).toEqual({
+      type: "text",
+      text: '<file name="notes.md">\n# Notes\n</file>',
+    });
+    expect(built.manifest).toMatchObject([
+      { fileId: "file_a", status: "delivered_now" },
+    ]);
+  });
+
+  it("withholds non-UTF-8 inline files with an explicit reason instead of mangling them", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge(), {
+        applicableFiles: [
+          applicableFile("file_bin", {
+            filename: "blob.bin",
+            mimeType: "application/octet-stream",
+            bytes: new Uint8Array([0xff, 0xfe, 0x00, 0x01]),
+          }),
+        ],
+      }),
+    );
+
+    expect(chatUserContent(built.requestBody)).toEqual([
+      { type: "text", text: "candidate deliverable text" },
+    ]);
+    expect(built.manifest).toMatchObject([
+      { fileId: "file_bin", status: "withheld", reason: "inline_bytes_not_utf8" },
+    ]);
+    expect(deriveFileVisibility(built.manifest)).toBe(false);
+  });
+
+  it("withholds inline files missing bytes instead of sending an empty part", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge(), {
+        applicableFiles: [applicableFile("file_missing")],
+      }),
+    );
+
+    expect(chatUserContent(built.requestBody)).toEqual([
+      { type: "text", text: "candidate deliverable text" },
+    ]);
+    expect(built.manifest).toMatchObject([
+      { fileId: "file_missing", status: "withheld", reason: "inline_bytes_missing" },
+    ]);
+  });
+});
+
+
 describe("history-aware file delivery (item 12)", () => {
   it("attaches a file on stateful call 1 and omits it as inherited on call 2", () => {
     const config = openAiJudge();

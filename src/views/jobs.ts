@@ -85,6 +85,22 @@ function renderUsageSummary(job: JobStateResponse): string {
     `</dl>`,
   ].join("");
 }
+/**
+ * Wraps long rendered content in a collapsed preview. The body is clamped by
+ * CSS to ~10 lines with a fade; the toggle expands it in place. `expandId`
+ * must be unique within the fragment so the client can persist open state
+ * across fragment refreshes. `innerHtml` is rendered content, never raw model
+ * text (deliverables pass through `renderMarkdown`, judge comments through
+ * `escapeHtml`).
+ */
+function renderExpandableContent(expandId: string, innerHtml: string): string {
+  return [
+    `<div class="expandable" data-expand-id="${escapeHtml(expandId)}">`,
+    `<div class="expandable-body">${innerHtml}</div>`,
+    `<button type="button" class="expand-toggle" aria-expanded="false">Show more</button>`,
+    `</div>`,
+  ].join("");
+}
 
 function renderDeliverable(
   deliverable: JobDeliverable,
@@ -107,7 +123,10 @@ function renderDeliverable(
     `<span class="deliverable-latest-response-id turn-response">Latest provider response: ${renderResponseId(latestProviderResponseId)}</span>`,
     marginal,
     `</header>`,
-    `<div class="deliverable-content">${renderMarkdown(deliverable.text)}</div>`,
+    renderExpandableContent(
+      `deliverable-turn-${deliverable.turnIndex}`,
+      `<div class="deliverable-content">${renderMarkdown(deliverable.text)}</div>`,
+    ),
     judgeCalls.map(renderTurnJudgeResult).join(""),
     `</section>`,
   ].join("");
@@ -123,16 +142,23 @@ function renderTurnJudgeResult(judgeCall: JudgeCallSummaryRow): string {
     judgeCall.verdict === null
       ? `<span class="muted">—</span>`
       : renderStatusBadge(judgeCall.verdict);
-  const comment =
+  const commentBody =
     judgeCall.comment === null || judgeCall.comment === ""
       ? `<span class="muted">—</span>`
       : escapeHtml(judgeCall.comment);
+  const comment =
+    judgeCall.comment === null || judgeCall.comment === ""
+      ? `<p class="turn-judge-comment">${commentBody}</p>`
+      : renderExpandableContent(
+          `judge-comment-${judgeCall.judge_call_id}`,
+          `<p class="turn-judge-comment">${commentBody}</p>`,
+        );
 
   return [
     `<section class="turn-judge" data-judge-call-id="${escapeHtml(judgeCall.judge_call_id)}">`,
     verdict,
     `<span class="turn-judge-grade">Grade: ${renderOptionalText(judgeCall.grade)}</span>`,
-    `<p class="turn-judge-comment">${comment}</p>`,
+    comment,
     `</section>`,
   ].join("");
 }

@@ -1544,6 +1544,62 @@ em[class*="status-"] {
   margin-bottom: 0;
 }
 
+/* Collapsed long-form preview: first ~10 lines with a fade, expandable. */
+.expandable {
+  min-width: 0;
+}
+
+.turn-judge .expandable {
+  flex: 1 0 100%;
+}
+
+.expandable-body {
+  position: relative;
+  max-height: 14rem;
+  overflow: hidden;
+}
+
+.expandable[data-open="true"] .expandable-body {
+  max-height: none;
+  overflow: visible;
+}
+
+.expandable-body::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 4rem;
+  background: linear-gradient(to bottom, transparent, var(--surface));
+  pointer-events: none;
+}
+
+.expandable[data-open="true"] .expandable-body::after,
+.expandable-body[data-fits="true"]::after {
+  display: none;
+}
+
+.expand-toggle {
+  margin-top: 0.45rem;
+  padding: 0.2rem 0.7rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.expand-toggle:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.expand-toggle[hidden] {
+  display: none;
+}
+
 .deliverable :is(h1, h2, h3, h4, h5, h6) {
   margin: 1.5em 0 0.55em;
   line-height: 1.25;

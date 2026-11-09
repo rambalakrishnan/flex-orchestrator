@@ -563,6 +563,39 @@ let detailJobId = null;
 let detailRefreshTimer = null;
 let dialogActionRunning = false;
 
+const expandedContentIds = new Set();
+
+function expandedKey(expandId) {
+  return detailJobId === null ? expandId : detailJobId + "\n" + expandId;
+}
+
+function setExpandToggleState(toggle, open) {
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  toggle.textContent = open ? "Show less" : "Show more";
+}
+
+function applyExpandState(wrapper) {
+  const expandId = wrapper.getAttribute("data-expand-id");
+  const toggle = wrapper.querySelector(".expand-toggle");
+  const body = wrapper.querySelector(".expandable-body");
+  if (!(toggle instanceof HTMLButtonElement) || !(body instanceof HTMLElement)) return;
+  const open = expandId !== null && expandedContentIds.has(expandedKey(expandId));
+  if (open) wrapper.setAttribute("data-open", "true");
+  else wrapper.removeAttribute("data-open");
+  setExpandToggleState(toggle, open);
+  // Hide the toggle entirely when the content fits without clamping. Measure
+  // only while collapsed: an open body reports its full height as fitting.
+  const fits = !open && body.scrollHeight <= body.clientHeight + 1;
+  body.dataset.fits = fits ? "true" : "false";
+  toggle.hidden = fits;
+}
+
+function syncExpandToggles() {
+  for (const wrapper of dialogBody.querySelectorAll(".expandable")) {
+    if (wrapper instanceof HTMLElement) applyExpandState(wrapper);
+  }
+}
+
 function stopDetailRefresh() {
   if (detailRefreshTimer !== null) {
     clearInterval(detailRefreshTimer);
@@ -600,6 +633,7 @@ async function refreshDetailFragment(jobId, silent) {
       if (healthRegion instanceof HTMLElement) dialogBody.appendChild(healthRegion);
       if (jsonlRegion instanceof HTMLElement) dialogBody.appendChild(jsonlRegion);
       if (actionError instanceof HTMLElement) dialogBody.prepend(actionError);
+      syncExpandToggles();
       return;
     }
     if (!silent) {
@@ -1022,6 +1056,18 @@ jobList.addEventListener("click", (event) => {
 });
 dialogBody.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
+  const toggle = event.target.closest(".expand-toggle");
+  if (toggle instanceof HTMLButtonElement) {
+    const wrapper = toggle.closest(".expandable");
+    const expandId = wrapper?.getAttribute("data-expand-id") ?? null;
+    const open = toggle.getAttribute("aria-expanded") !== "true";
+    if (expandId !== null) {
+      if (open) expandedContentIds.add(expandedKey(expandId));
+      else expandedContentIds.delete(expandedKey(expandId));
+    }
+    if (wrapper instanceof HTMLElement) applyExpandState(wrapper);
+    return;
+  }
   const control = event.target.closest("[data-action]");
   if (control !== null) void handleDialogAction(control);
 });

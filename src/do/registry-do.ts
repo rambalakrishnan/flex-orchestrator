@@ -97,6 +97,7 @@ const TERMINAL_JOB_STATUS: Record<JobStatus, boolean> = {
   paused_review: false,
   paused_dispatch: false,
   paused_storage: false,
+  paused_operator: false,
   completed: true,
   failed: true,
   cancelled: true,

@@ -147,9 +147,9 @@ describe("migration tracking", () => {
 
       const result = migrateJobDoSchema(storage);
 
-      expect(result.appliedVersions).toEqual([1]);
-      expect(result.version).toBe(1);
-      expect(getCurrentSchemaVersion(storage.sql)).toBe(1);
+      expect(result.appliedVersions).toEqual([1, 2]);
+      expect(result.version).toBe(2);
+      expect(getCurrentSchemaVersion(storage.sql)).toBe(2);
       expect(hasTable(storage.sql, "_sql_schema_migrations")).toBe(true);
 
       const applied = storage.sql
@@ -157,7 +157,7 @@ describe("migration tracking", () => {
           "SELECT id, applied_at FROM _sql_schema_migrations ORDER BY id"
         )
         .toArray();
-      expect(applied.map((row) => row.id)).toEqual([1]);
+      expect(applied.map((row) => row.id)).toEqual([1, 2]);
       expect(typeof applied[0]!.applied_at).toBe("string");
       expect(applied[0]!.applied_at.length).toBeGreaterThan(0);
     });
@@ -202,7 +202,7 @@ describe("migration tracking", () => {
   it("applies zero new migrations on a second run and neither recreates nor alters tables", async () => {
     await withEmptyStorage((storage) => {
       const first = migrateJobDoSchema(storage);
-      expect(first.appliedVersions).toEqual([1]);
+      expect(first.appliedVersions).toEqual([1, 2]);
       const beforeSnapshot = schemaSnapshot(storage);
       const beforeTables = tableNames(storage);
 
@@ -211,7 +211,7 @@ describe("migration tracking", () => {
       const second = migrateJobDoSchema(storage);
 
       expect(second.appliedVersions).toEqual([]);
-      expect(second.version).toBe(1);
+      expect(second.version).toBe(2);
       expect(schemaSnapshot(storage)).toEqual(beforeSnapshot);
       expect(tableNames(storage)).toEqual(beforeTables);
 
@@ -226,25 +226,64 @@ describe("migration tracking", () => {
       const migrationRows = storage.sql
         .exec<{ id: number }>("SELECT id FROM _sql_schema_migrations ORDER BY id")
         .toArray();
-      expect(migrationRows.map((row) => row.id)).toEqual([1]);
+      expect(migrationRows.map((row) => row.id)).toEqual([1, 2]);
     });
   });
 
   it("accepts the frozen job status vocabulary in the migrated jobs table", async () => {
     await withEmptyStorage((storage) => {
       migrateJobDoSchema(storage);
-
       insertJob(storage, "job_ready", "ready");
+      insertJob(storage, "job_operator_pause", "paused_operator");
       expect(
         storage.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM jobs").one().total
-      ).toBe(1);
+      ).toBe(2);
 
       expect(() => insertJob(storage, "job_legacy", "paused_storage_error")).toThrow(
         /CHECK constraint failed/i
       );
       expect(
         storage.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM jobs").one().total
-      ).toBe(1);
+      ).toBe(2);
+    });
+  });
+
+  it("upgrades a v1 jobs table to v2 without losing rows", async () => {
+    await withEmptyStorage((storage) => {
+      // Simulate a deployed v1 database: apply only the v1 step manually,
+      // with the v1 status vocabulary (no `paused_operator`).
+      storage.sql.exec(CREATE_SCHEMA_MIGRATIONS_TABLE_SQL);
+      for (const ddl of JOB_DO_TABLE_DDL) {
+        storage.sql.exec(
+          ddl.replace("      'paused_storage',\n      'paused_operator',", "      'paused_storage',"),
+        );
+      }
+      for (const indexStmt of JOB_DO_INDEX_SQL_STATEMENTS) {
+        storage.sql.exec(indexStmt);
+      }
+      storage.sql.exec("INSERT INTO _sql_schema_migrations (id) VALUES (1)");
+      expect(getCurrentSchemaVersion(storage.sql)).toBe(1);
+
+      insertJob(storage, "job_v1_row", "running");
+      expect(() => insertJob(storage, "job_v1_pause", "paused_operator")).toThrow(
+        /CHECK constraint failed/i,
+      );
+
+      const result = migrateJobDoSchema(storage);
+      expect(result.appliedVersions).toEqual([2]);
+      expect(result.version).toBe(2);
+
+      const rows = storage.sql
+        .exec<{ job_id: string; status: string }>(
+          "SELECT job_id, status FROM jobs ORDER BY job_id",
+        )
+        .toArray();
+      expect(rows).toEqual([{ job_id: "job_v1_row", status: "running" }]);
+
+      insertJob(storage, "job_v2_pause", "paused_operator");
+      expect(
+        storage.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM jobs").one().total,
+      ).toBe(2);
     });
   });
 });
@@ -304,15 +343,15 @@ describe("partial migration rollback", () => {
       failOnTurnsCreate = false;
       const recovered = migrateJobDoSchema(storage);
 
-      expect(recovered.appliedVersions).toEqual([1]);
-      expect(recovered.version).toBe(1);
+      expect(recovered.appliedVersions).toEqual([1, 2]);
+      expect(recovered.version).toBe(2);
       expect(hasTable(storage.sql, "turns")).toBe(true);
       expect(tableNames(storage)).toHaveLength(JOB_DO_TABLE_DDL.length + 1);
       expect(
         storage.sql
           .exec<{ total: number }>("SELECT COUNT(*) AS total FROM _sql_schema_migrations")
           .one().total
-      ).toBe(1);
+      ).toBe(2);
 
       insertJob(storage, "job_after_recovery", "created");
       expect(
@@ -385,9 +424,9 @@ describe("migration tracking mechanism", () => {
       // only be versioned through the explicit tracking table.
       expect(() => storage.sql.exec("PRAGMA user_version")).toThrow(/not authorized.*SQLITE_AUTH/i);
 
-      expect(getCurrentSchemaVersion(storage.sql)).toBe(1);
+      expect(getCurrentSchemaVersion(storage.sql)).toBe(2);
       const recorded = storage.sql.exec<{ id: number }>("SELECT id FROM _sql_schema_migrations").toArray();
-      expect(recorded.map((row) => row.id)).toEqual([1]);
+      expect(recorded.map((row) => row.id)).toEqual([1, 2]);
     });
   });
 });

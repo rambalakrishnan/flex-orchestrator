@@ -335,7 +335,7 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 ### Operator recovery and diagnostics
 - [ ] A failed job detail shows its persisted error code and message, **Resume Job**, and **Retry Turn** on the current turn.
 - [ ] **Resume Job** on a failed, `paused_dispatch`, or `paused_storage` job starts a new manual attempt and does not reset automatic recovery counters.
-- [ ] **Retry Turn** rejects a turn index other than the current one with HTTP 409 `turn_not_current`; a non-recoverable status returns 409 `job_not_recoverable`.
+- [ ] **Pause Job** on an active job stops scheduling, cancels the in-flight provider response, and freezes pending judge calls; a late completion does not settle the turn. **Resume Job** on `paused_operator` continues the same turn without spending a retry.
 - [ ] Creating a job with an external `previous_response_id` shows that ID as the initial anchor, records the `external_previous_response_id:<id>` warning, and replaces it after turn 1 is accepted.
 - [ ] Accepted and latest-attempt provider response IDs are visible in the job detail and in each turn row.
 - [ ] **Count Tokens** succeeds for each pending turn; with an invalid provider credential it shows a sanitized provider status/code and the **Health Check** probes report the failure without exposing the secret.

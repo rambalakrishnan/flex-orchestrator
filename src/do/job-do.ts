@@ -180,6 +180,14 @@ const TERMINAL_JOB_STATUSES: ReadonlySet<JobRow["status"]> = new Set([
   "superseded",
 ]);
 
+/** Job states that halt automatic execution without terminating the job. */
+const PAUSED_JOB_STATUSES: ReadonlySet<JobRow["status"]> = new Set([
+  "paused_review",
+  "paused_dispatch",
+  "paused_storage",
+  "paused_operator",
+]);
+
 /** Stale in-flight work older than this is reconciled rather than re-sent. */
 const WORK_CLAIM_STALE_MS = 120_000;
 
@@ -1092,21 +1100,192 @@ export class JobDO extends DurableObject<Env> {
     return this.requireState();
   }
 
-  /** Resumes a failed job or a job paused by dispatch/storage faults. */
+  /**
+   * Halts an active job without terminating it. Cancels every in-flight
+   * generation attempt, freezes pending judge calls in place (clearing only
+   * the stale-dispatch claim), deletes all durable work so no alarm fires
+   * during the pause, and best-effort cancels the provider response so spend
+   * stops at the provider too. Accepted turns are untouched; `resumeJob`
+   * continues from the current turn.
+   */
+  async pauseJob(): Promise<JobStateResponse> {
+    const job = requireJob(this.sql);
+    if (
+      job.status !== "created" &&
+      job.status !== "ready" &&
+      job.status !== "running"
+    ) {
+      throw new Error(`pauseJob requires an active job; current status is ${job.status}`);
+    }
+
+    const nowIso = toIso(now());
+    const inFlightAttempts = this.listAllAttemptSummaries().filter((attempt) =>
+      IN_FLIGHT_ATTEMPT_STATUSES.has(attempt.status),
+    );
+    const providerResponseIds = inFlightAttempts
+      .map((attempt) => attempt.provider_response_id)
+      .filter((responseId): responseId is string => responseId !== null);
+    const pausedTurnIndex =
+      inFlightAttempts.length > 0
+        ? inFlightAttempts[inFlightAttempts.length - 1]!.turn_index
+        : job.current_turn_index;
+
+    this.storage.transactionSync(() => {
+      for (const attempt of inFlightAttempts) {
+        updateGenerationAttemptState(this.sql, {
+          attemptId: attempt.attempt_id,
+          status: "cancelled",
+          nextBackoffAtMs: null,
+          nextPollAtMs: null,
+          diagnosticsJson: mergeAttemptDiagnostics(attempt.diagnostics_json, {
+            provider_error_message: "Paused by operator",
+            dispatch_started_at_ms: null,
+            settle_claimed_at_ms: null,
+          }),
+          nowIso,
+        });
+      }
+      // Pending judge calls are deliberately left `pending`: clearing the
+      // dispatch claim is unnecessary (staleness is time-based) and settling
+      // them as `unknown` would corrupt the evaluation. `processJudgeWork`
+      // refuses to fire while the job is paused; `resumeOperatorPause`
+      // re-enqueues judge work for any turn stuck in `awaiting_judge`.
+      // Turn statuses are deliberately left untouched: the paused job keeps
+      // `running`/`awaiting_judge` turns as-is so `resumeOperatorPause` can
+      // tell a mid-generation pause from a mid-judge pause and continue the
+      // correct pipeline stage.
+      for (;;) {
+        const works = this.listAllDurableWork();
+        if (works.length === 0) {
+          break;
+        }
+        for (const work of works) {
+          deleteDurableWork(this.sql, work.work_id);
+        }
+      }
+      updateJobStatusAndRevision(this.sql, {
+        jobId: job.job_id,
+        status: "paused_operator",
+        activeAttemptId: null,
+        currentTurnIndex: pausedTurnIndex,
+        lastErrorCode: "operator_paused",
+        lastErrorDetail: "Paused by operator",
+        usageSummaryJson: JSON.stringify(this.computeUsageAggregate()),
+        updatedAt: nowIso,
+      });
+    });
+
+    for (const responseId of providerResponseIds) {
+      try {
+        const apiKey = resolveEnvSecret(this.env, "OPENAI_API_KEY");
+        await cancelProviderResponse({ apiKey, responseId });
+      } catch {
+        // Cancellation is best-effort; the local halt is authoritative.
+      }
+    }
+
+    const row = requireJob(this.sql, job.job_id);
+    await this.publishAndSchedule(row);
+    return this.requireState();
+  }
+
+  /**
+   * Resumes a halted job. Fault pauses and failures retry the current turn;
+   * an operator pause continues scheduling from the accepted anchor without
+   * spending a manual retry.
+   */
   async resumeJob(): Promise<JobStateResponse> {
     const job = requireJob(this.sql);
+    if (job.status === "paused_operator") {
+      await this.protectRecoveryFileRefs(job);
+      await this.resumeOperatorPause(job);
+      return this.requireState();
+    }
     if (
       job.status !== "failed" &&
       job.status !== "paused_dispatch" &&
       job.status !== "paused_storage"
     ) {
       throw new Error(
-        `resumeJob requires a failed, paused_dispatch, or paused_storage job; current status is ${job.status}`
+        `resumeJob requires a failed, paused_dispatch, paused_storage, or paused_operator job; current status is ${job.status}`
       );
     }
     await this.protectRecoveryFileRefs(job);
     await this.performManualRetry(job);
     return this.requireState();
+  }
+
+  /** Continues a job halted by the operator without spending a retry. */
+  private async resumeOperatorPause(job: JobRow): Promise<void> {
+    const nextIndex = job.accepted_turn_index + 1;
+    const nextTurn = getTurnSummary(this.sql, nextIndex);
+    const nowIso = toIso(now());
+    if (nextTurn === null) {
+      this.storage.transactionSync(() => {
+        updateJobStatusAndRevision(this.sql, {
+          jobId: job.job_id,
+          status: "completed",
+          activeAttemptId: null,
+          currentTurnIndex: job.current_turn_index,
+          lastErrorCode: null,
+          lastErrorDetail: null,
+          updatedAt: nowIso,
+        });
+      });
+      const completedRow = requireJob(this.sql, job.job_id);
+      await this.publishAndSchedule(completedRow);
+      await this.registryStub().releaseJobFileRefs(job.job_id);
+      return;
+    }
+    const pendingJudgeCall = this.listAllJudgeSummaries(nextIndex).find(
+      (call) => call.status === "pending",
+    );
+    if (nextTurn.status === "awaiting_judge" && pendingJudgeCall !== undefined) {
+      this.storage.transactionSync(() => {
+        updateJobStatusAndRevision(this.sql, {
+          jobId: job.job_id,
+          status: "running",
+          activeAttemptId: null,
+          currentTurnIndex: nextIndex,
+          lastErrorCode: null,
+          lastErrorDetail: null,
+          updatedAt: nowIso,
+        });
+        upsertDurableWork(this.sql, {
+          work_id: `${pendingJudgeCall.judge_call_id}${DISPATCH_WORK_SUFFIX}`,
+          kind: "judge_dispatch",
+          attempt_id: pendingJudgeCall.attempt_id,
+          turn_index: nextIndex,
+          due_at_ms: now() + DISPATCH_WORK_DELAY_MS,
+          payload_json: JSON.stringify({
+            kind: "judge_dispatch",
+            judgeCallId: pendingJudgeCall.judge_call_id,
+            attemptId: pendingJudgeCall.attempt_id,
+          }),
+          created_at: nowIso,
+        });
+      });
+      const resumedRow = requireJob(this.sql, job.job_id);
+      await this.publishAndSchedule(resumedRow);
+      return;
+    }
+    this.storage.transactionSync(() => {
+      updateJobStatusAndRevision(this.sql, {
+        jobId: job.job_id,
+        status: "ready",
+        activeAttemptId: null,
+        currentTurnIndex: nextIndex,
+        lastErrorCode: null,
+        lastErrorDetail: null,
+        updatedAt: nowIso,
+      });
+    });
+    const fresh = requireJob(this.sql, job.job_id);
+    await this.publishAndSchedule(fresh);
+    // Start the unaccepted turn directly: it is typically `running`, not
+    // `pending`, so the pending-turn scheduler would stall. `initial` keeps
+    // the accepted-chain anchor instead of replaying history from scratch.
+    await this.startGenerationAttempt(fresh.job_id, nextIndex, "initial", 0, null);
   }
 
   /** Retries the current turn of a failed, paused, or paused-for-review job. */
@@ -1118,14 +1297,9 @@ export class JobDO extends DurableObject<Env> {
         `retryTurn requires the current turn index ${job.current_turn_index}; received ${requestedTurnIndex}`
       );
     }
-    if (
-      job.status !== "failed" &&
-      job.status !== "paused_review" &&
-      job.status !== "paused_dispatch" &&
-      job.status !== "paused_storage"
-    ) {
+    if (job.status !== "failed" && !PAUSED_JOB_STATUSES.has(job.status)) {
       throw new Error(
-        `retryTurn requires a failed, paused_review, paused_dispatch, or paused_storage job; current status is ${job.status}`
+        `retryTurn requires a failed or paused job; current status is ${job.status}`
       );
     }
     await this.protectRecoveryFileRefs(job);
@@ -1626,7 +1800,7 @@ export class JobDO extends DurableObject<Env> {
       return;
     }
     const job = getJob(this.sql);
-    if (job === null || job.status === "cancelled" || job.status === "superseded") {
+    if (job === null || job.status === "cancelled" || job.status === "superseded" || PAUSED_JOB_STATUSES.has(job.status)) {
       return;
     }
     if (attempt.status !== "dispatched" && attempt.status !== "dispatching") {
@@ -2458,6 +2632,10 @@ export class JobDO extends DurableObject<Env> {
       await this.pauseStorage(job.job_id, attempt.turn_index, attemptId, "Missing generation request artifact");
       return;
     }
+    const refreshedJob = getJob(this.sql);
+    if (refreshedJob !== null && PAUSED_JOB_STATUSES.has(refreshedJob.status)) {
+      return;
+    }
 
     let outcome;
     try {
@@ -2486,6 +2664,9 @@ export class JobDO extends DurableObject<Env> {
       return;
     }
     const job = requireJob(this.sql);
+    if (PAUSED_JOB_STATUSES.has(job.status)) {
+      return;
+    }
     const nowMs = now();
     const nowIso = toIso(nowMs);
     const decision = classifyDispatchResult({
@@ -2731,6 +2912,9 @@ export class JobDO extends DurableObject<Env> {
     }
     const attempt = getGenerationAttemptSummary(this.sql, attemptId);
     if (attempt === null) {
+      return null;
+    }
+    if (PAUSED_JOB_STATUSES.has(job.status)) {
       return null;
     }
     const nowMs = now();
@@ -3502,6 +3686,10 @@ export class JobDO extends DurableObject<Env> {
         advisoryWarnings: built.request.advisoryWarnings,
       };
     } else {
+      const pausedCheck = getJob(this.sql);
+      if (pausedCheck !== null && PAUSED_JOB_STATUSES.has(pausedCheck.status)) {
+        return;
+      }
       try {
         const dispatched = await dispatchResponsesCreate({
           apiKey,
@@ -3979,9 +4167,7 @@ export class JobDO extends DurableObject<Env> {
       return;
     }
     if (
-      job.status === "paused_review" ||
-      job.status === "paused_dispatch" ||
-      job.status === "paused_storage" ||
+      PAUSED_JOB_STATUSES.has(job.status) ||
       TERMINAL_JOB_STATUSES.has(job.status)
     ) {
       return;
@@ -4078,12 +4264,7 @@ export class JobDO extends DurableObject<Env> {
   }
 
   private async performManualRetry(job: JobRow): Promise<void> {
-    if (
-      job.status !== "paused_review" &&
-      job.status !== "paused_dispatch" &&
-      job.status !== "paused_storage" &&
-      job.status !== "failed"
-    ) {
+    if (!PAUSED_JOB_STATUSES.has(job.status) && job.status !== "failed") {
       throw new Error("manual_retry requires a paused or failed job");
     }
     const turnIndex = job.current_turn_index;
@@ -4333,9 +4514,7 @@ export class JobDO extends DurableObject<Env> {
     }
     if (
       TERMINAL_JOB_STATUSES.has(job.status) ||
-      job.status === "paused_review" ||
-      job.status === "paused_dispatch" ||
-      job.status === "paused_storage"
+      PAUSED_JOB_STATUSES.has(job.status)
     ) {
       this.deleteWork(work.work_id);
       return;
@@ -4382,7 +4561,7 @@ export class JobDO extends DurableObject<Env> {
         nowMs - diagnostics.settle_claimed_at_ms >= WORK_CLAIM_STALE_MS
       ) {
         const stuckJob = getJob(this.sql);
-        if (stuckJob === null) {
+        if (stuckJob === null || PAUSED_JOB_STATUSES.has(stuckJob.status)) {
           this.deleteWork(work.work_id);
           return;
         }
@@ -4459,7 +4638,7 @@ export class JobDO extends DurableObject<Env> {
         });
         deleteDurableWork(this.sql, `${attemptId}${POLL_WORK_SUFFIX}`);
       });
-      if (job !== null) {
+      if (job !== null && !PAUSED_JOB_STATUSES.has(job.status)) {
         await this.pauseForManualRecovery(
           job.job_id,
           attempt.turn_index,
@@ -4509,7 +4688,7 @@ export class JobDO extends DurableObject<Env> {
       return;
     }
     const job = getJob(this.sql);
-    if (job === null) {
+    if (job === null || PAUSED_JOB_STATUSES.has(job.status)) {
       this.deleteWork(work.work_id);
       return;
     }

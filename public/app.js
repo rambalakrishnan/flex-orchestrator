@@ -878,6 +878,7 @@ async function handleDialogAction(control) {
   if (!(control instanceof HTMLElement)) return;
   const action = control.getAttribute("data-action");
   if (
+    action !== "pause-job" &&
     action !== "resume-job" &&
     action !== "retry-turn" &&
     action !== "check-health" &&
@@ -912,7 +913,11 @@ async function handleDialogAction(control) {
     }
 
     let response;
-    if (action === "resume-job") {
+    if (action === "pause-job") {
+      response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/pause", {
+        method: "POST",
+      });
+    } else if (action === "resume-job") {
       response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/resume", {
         method: "POST",
       });

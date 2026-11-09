@@ -167,6 +167,16 @@ function renderFlag(value: number | null): string {
 }
 
 /**
+ * Job statuses that accept an operator pause: anything still schedulable.
+ * Already-halted or terminal jobs cannot be paused again.
+ */
+function isPausableJobStatus(
+  status: JobStateResponse["job"]["status"],
+): boolean {
+  return status === "created" || status === "ready" || status === "running";
+}
+
+/**
  * Job statuses that accept an in-place resume. `paused_review` deliberately
  * requires a turn retry or an operator review decision instead.
  */
@@ -176,7 +186,8 @@ function isResumeJobStatus(
   return (
     status === "failed" ||
     status === "paused_dispatch" ||
-    status === "paused_storage"
+    status === "paused_storage" ||
+    status === "paused_operator"
   );
 }
 
@@ -221,6 +232,10 @@ function renderJobErrorBanner(job: JobStateResponse): string {
 
 function renderResumeJobButton(jobId: string): string {
   return `<button type="button" class="action-button" data-action="resume-job" data-job-id="${escapeHtml(jobId)}">Resume Job</button>`;
+}
+
+function renderPauseJobButton(jobId: string): string {
+  return `<button type="button" class="action-button" data-action="pause-job" data-job-id="${escapeHtml(jobId)}">Pause Job</button>`;
 }
 
 function renderRetryTurnButton(jobId: string, turnIndex: number): string {
@@ -585,6 +600,9 @@ export function renderJobDetail(
       ? `<a class="button download-final" href="/api/jobs/${escapeHtml(encodeURIComponent(job.job.jobId))}/export/markdown" download>Download Final Markdown</a>`
       : "";
   const jobActions = [
+    isPausableJobStatus(job.job.status)
+      ? renderPauseJobButton(job.job.jobId)
+      : "",
     isResumeJobStatus(job.job.status)
       ? renderResumeJobButton(job.job.jobId)
       : "",

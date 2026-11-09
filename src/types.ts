@@ -256,6 +256,7 @@ export type JobStatus =
   | "paused_review"
   | "paused_dispatch"
   | "paused_storage"
+  | "paused_operator"
   | "completed"
   | "failed"
   | "cancelled"

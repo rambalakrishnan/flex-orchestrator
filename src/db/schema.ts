@@ -17,7 +17,7 @@ import {
 import { ArtifactGuardError } from "../lib/guards.ts";
 
 /** Current schema version for `JobDO`, `RouterDO`, and `RegistryDO`. */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 // ============================================================================
 // Minimal Structural SQL Interfaces (Compatible with Cloudflare SqlStorage)
@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS jobs (
       'paused_review',
       'paused_dispatch',
       'paused_storage',
+      'paused_operator',
       'completed',
       'failed',
       'cancelled',
@@ -616,6 +617,7 @@ CREATE TABLE IF NOT EXISTS job_index (
       'paused_review',
       'paused_dispatch',
       'paused_storage',
+      'paused_operator',
       'completed',
       'failed',
       'cancelled',
@@ -743,6 +745,7 @@ export type JobStatus =
   | "paused_review"
   | "paused_dispatch"
   | "paused_storage"
+  | "paused_operator"
   | "completed"
   | "failed"
   | "cancelled"
@@ -1078,13 +1081,50 @@ export const JOB_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
     statements: JOB_DO_TABLE_DDL,
     indexStatements: JOB_DO_INDEX_SQL_STATEMENTS,
   },
+  {
+    // SQLite cannot alter a CHECK constraint in place: rebuild `jobs` from
+    // the v2 DDL so deployed databases accept `paused_operator`. The copy is
+    // column-explicit and preserves every row byte-for-byte.
+    version: 2,
+    statements: [
+      "ALTER TABLE jobs RENAME TO jobs_v1;",
+      CREATE_JOBS_TABLE_SQL,
+      `INSERT INTO jobs (
+         job_id, title, status, model, reasoning_effort, max_output_tokens,
+         cache_ttl, web_search, judge_config_json, developer_prompt,
+         developer_file_ids_json, continuation_budget, continuations_used,
+         auto_retry_budget, auto_retries_used, manual_retries_used,
+         current_turn_index, total_turns, accepted_turn_index,
+         active_attempt_id, last_accepted_response_id, last_judge_response_id,
+         parent_job_id, fork_turn_index, revision, last_error_code,
+         last_error_detail, warnings_json, usage_summary_json, created_at,
+         updated_at
+       ) SELECT
+         job_id, title, status, model, reasoning_effort, max_output_tokens,
+         cache_ttl, web_search, judge_config_json, developer_prompt,
+         developer_file_ids_json, continuation_budget, continuations_used,
+         auto_retry_budget, auto_retries_used, manual_retries_used,
+         current_turn_index, total_turns, accepted_turn_index,
+         active_attempt_id, last_accepted_response_id, last_judge_response_id,
+         parent_job_id, fork_turn_index, revision, last_error_code,
+         last_error_detail, warnings_json, usage_summary_json, created_at,
+         updated_at
+       FROM jobs_v1;`,
+      "DROP TABLE jobs_v1;",
+    ],
+  },
 ];
-
 export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
   {
     version: 1,
     statements: ROUTER_DO_TABLE_DDL,
     indexStatements: ROUTER_DO_INDEX_SQL_STATEMENTS,
+  },
+  {
+    // RouterDO carries no job-status CHECK; the empty step keeps its
+    // recorded version aligned with the shared CURRENT_SCHEMA_VERSION.
+    version: 2,
+    statements: [],
   },
 ];
 
@@ -1093,6 +1133,21 @@ export const REGISTRY_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
     version: 1,
     statements: REGISTRY_DO_TABLE_DDL,
     indexStatements: REGISTRY_DO_INDEX_SQL_STATEMENTS,
+  },
+  {
+    version: 2,
+    statements: [
+      "ALTER TABLE job_index RENAME TO job_index_v1;",
+      CREATE_JOB_INDEX_TABLE_SQL,
+      `INSERT INTO job_index (
+         job_id, title, status, model, parent_job_id, is_terminal, revision,
+         current_turn_index, accepted_turn_count, created_at, updated_at
+       ) SELECT
+         job_id, title, status, model, parent_job_id, is_terminal, revision,
+         current_turn_index, accepted_turn_count, created_at, updated_at
+       FROM job_index_v1;`,
+      "DROP TABLE job_index_v1;",
+    ],
   },
 ];
 

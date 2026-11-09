@@ -33,6 +33,7 @@ interface JobDoTestStub {
   supersedeParent(epoch: number, childId: string): Promise<boolean>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
+  pauseJob(): Promise<JobStateResponse>;
   resumeJob(): Promise<JobStateResponse>;
   retryTurn(turnIndex: number): Promise<JobStateResponse>;
   captureBranchSnapshot(
@@ -607,5 +608,145 @@ describe("JobDO operator recovery", () => {
       }
     );
     expect(resumeMessage).toContain("current status is running");
+  });
+
+  it("pauses a running job mid-flight, blocks late settlement, and resumes the same turn", async () => {
+    const jobId = nextJobId();
+    const calls: FetchCall[] = [];
+    let dispatchCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const method = init?.method ?? "GET";
+        calls.push({ method, url });
+        if (method === "POST" && url.endsWith("/responses")) {
+          dispatchCount += 1;
+          const responseId = dispatchCount === 1 ? "resp_1" : "resp_2";
+          return new Response(
+            JSON.stringify({ id: responseId, model: "gpt-5", status: "queued" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (method === "GET" && url.includes("/responses/")) {
+          const responseId = url.includes("resp_2") ? "resp_2" : "resp_1";
+          return new Response(
+            JSON.stringify({
+              id: responseId,
+              model: "gpt-5",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "hello <!-- TURN_END:1 -->" }],
+                },
+              ],
+              usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/cancel")) {
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        throw new Error(`Unexpected provider call: ${method} ${url}`);
+      }),
+    );
+    const stub = stubFor(jobId);
+
+    await stub.createJob({
+      jobId,
+      title: "operator pause",
+      config: JOB_CONFIG,
+      initialTurns: [],
+    });
+    const appended = await stub.appendTurn({
+      promptText: "Write a greeting.",
+      attachmentFileIds: [],
+    });
+    expect(appended.job.status).toBe("running");
+    expect(appended.activeAttempt?.status).toBe("dispatched");
+    expect(appended.activeAttempt?.responseId).toBe("resp_1");
+
+    const paused = await stub.pauseJob();
+    expect(paused.job.status).toBe("paused_operator");
+    expect(paused.job.currentTurnIndex).toBe(1);
+    expect(paused.job.errorCode).toBe("operator_paused");
+    expect(paused.activeAttempt).toBeNull();
+    expect(
+      calls.some((call) => call.method === "POST" && call.url.endsWith("/cancel")),
+    ).toBe(true);
+
+    // A completion for the cancelled response must not settle the turn.
+    await stub.receiveWebhookDelivery({
+      webhookId: "wh_pause_1",
+      timestampSeconds: 1_760_000_000,
+      eventType: "response.completed",
+      responseId: "resp_1",
+      rawPayload: new ArrayBuffer(0),
+      receivedAtMs: 1_760_000_000_000,
+    });
+    const held = await stub.getState();
+    if (held === null) throw new Error("expected job state");
+    expect(held.job.status).toBe("paused_operator");
+    expect(held.turns[0]!.status).not.toBe("accepted");
+
+    // Resume continues the same turn from the accepted anchor: no new turn
+    // is created and the fresh attempt dispatches a new provider response.
+    const resumed = await stub.resumeJob();
+    expect(resumed.job.status).toBe("running");
+    expect(resumed.job.currentTurnIndex).toBe(1);
+    expect(resumed.turns).toHaveLength(1);
+    expect(resumed.activeAttempt?.status).toBe("dispatched");
+    expect(resumed.activeAttempt?.responseId).toBe("resp_2");
+
+    await stub.receiveWebhookDelivery({
+      webhookId: "wh_pause_2",
+      timestampSeconds: 1_760_000_100,
+      eventType: "response.completed",
+      responseId: "resp_2",
+      rawPayload: new ArrayBuffer(0),
+      receivedAtMs: 1_760_000_100_000,
+    });
+    const settled = await stub.getState();
+    if (settled === null) throw new Error("expected job state");
+    expect(settled.job.status).toBe("completed");
+    expect(settled.turns[0]!.status).toBe("accepted");
+    expect(settled.turns[0]!.acceptedResponseId).toBe("resp_2");
+  });
+
+  it("rejects pauseJob for halted or terminal jobs", async () => {
+    const jobId = nextJobId();
+    const calls: FetchCall[] = [];
+    stubProviderFetch(calls);
+    const stub = stubFor(jobId);
+    await stub.createJob({
+      jobId,
+      title: "pause guards",
+      config: JOB_CONFIG,
+      initialTurns: [],
+    });
+
+    const rawStub = env.JOB_DO.get(env.JOB_DO.idFromName(jobId));
+    const pauseOnce = await stub.pauseJob();
+    expect(pauseOnce.job.status).toBe("paused_operator");
+    const repeatMessage = await runInDurableObject(
+      rawStub,
+      async (instance): Promise<string> => {
+        const jobDo = instance as unknown as JobDoTestStub;
+        try {
+          await jobDo.pauseJob();
+          return "";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
+    );
+    expect(repeatMessage).toContain("pauseJob requires an active job");
   });
 });

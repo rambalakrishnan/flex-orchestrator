@@ -110,6 +110,7 @@ interface JobDoRpcStub {
   getState(): Promise<JobStateResponse | null>;
   appendTurn(command: AppendTurnCommand): Promise<JobStateResponse>;
   applyOperatorDecision(decision: OperatorReviewDecision): Promise<JobStateResponse>;
+  pauseJob(): Promise<JobStateResponse>;
   resumeJob(): Promise<JobStateResponse>;
   retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
@@ -234,6 +235,13 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
       }
       rejectUnknownQuery(url, []);
       return getJobFragment(env, jobId);
+    case "pause":
+      if (method !== "POST") {
+        return methodNotAllowed(["POST"]);
+      }
+      assertApplicationOrigin(request, env);
+      rejectUnknownQuery(url, []);
+      return pauseJob(env, jobId);
     case "resume":
       if (method !== "POST") {
         return methodNotAllowed(["POST"]);
@@ -407,8 +415,22 @@ async function reviewJob(
 }
 
 /**
- * Resumes a failed job or one paused by a dispatch/storage fault. Status
- * preconditions are enforced inside `JobDO`.
+ * Halts an active job without terminating it. Status preconditions are
+ * enforced inside `JobDO`.
+ */
+async function pauseJob(env: Env, jobId: JobId): Promise<Response> {
+  const stub = getJobStub(env, jobId);
+  try {
+    return jsonResponse(await stub.pauseJob());
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+/**
+ * Resumes a halted job: failed and fault-paused jobs retry the current turn;
+ * operator-paused jobs continue scheduling. Status preconditions are enforced
+ * inside `JobDO`.
  */
 async function resumeJob(env: Env, jobId: JobId): Promise<Response> {
   const stub = getJobStub(env, jobId);
@@ -2088,6 +2110,9 @@ function rpcErrorResponse(err: unknown): Response {
     message.includes("manual_retry requires")
   ) {
     return conflict("Job is not in a recoverable state", "job_not_recoverable");
+  }
+  if (message.includes("pauseJob requires an active job")) {
+    return conflict("Job is not in a pausable state", "job_not_pausable");
   }
   const lowerMessage = message.toLowerCase();
   if (lowerMessage.includes("not found") || lowerMessage.includes("no such job")) {

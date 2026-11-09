@@ -933,7 +933,8 @@ describe("schema DDL validation", () => {
       };
 
       insertJob("job_ready", "ready");
-      expect(countRows(storage, "jobs")).toBe(1);
+      insertJob("job_operator_pause", "paused_operator");
+      expect(countRows(storage, "jobs")).toBe(2);
 
       for (const legacyStatus of ["paused_ambiguous_dispatch", "paused_storage_error"]) {
         expectRejectedInsert(

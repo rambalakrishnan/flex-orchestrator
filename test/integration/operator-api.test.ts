@@ -407,6 +407,45 @@ describe("operator API diagnostics", () => {
     expect(readBackBody.job.status).not.toBe("failed");
   });
 
+  it("pauses a running job, rejects a second pause, and resumes it", async () => {
+    const calls = installProviderMock(() =>
+      providerJson({ id: "resp_pause_route", status: "queued" }),
+    );
+
+    const jobId = nextJobId("job_operator_pause");
+    const created = await postJob(jobId);
+    expect(created.status).toBe(201);
+    trackJobId(jobId);
+    await waitForJobStatus(jobId, ["running"]);
+
+    const paused = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/pause`, {
+      method: "POST",
+      headers: { origin: APP_ORIGIN },
+    });
+    expect(paused.status).toBe(200);
+    const pausedBody = (await paused.json()) as JobStateBody;
+    expect(pausedBody.job.status).toBe("paused_operator");
+    expect(pausedBody.activeAttempt).toBeNull();
+
+    const repeated = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/pause`, {
+      method: "POST",
+      headers: { origin: APP_ORIGIN },
+    });
+    expect(repeated.status).toBe(409);
+    const repeatedBody = (await repeated.json()) as ErrorBody;
+    expect(repeatedBody.error.code).toBe("job_not_pausable");
+
+    const resumed = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/resume`, {
+      method: "POST",
+      headers: { origin: APP_ORIGIN },
+    });
+    expect(resumed.status).toBe(200);
+    const resumedBody = (await resumed.json()) as JobStateBody;
+    expect(resumedBody.job.status).toBe("running");
+    expect(resumedBody.job.currentTurnIndex).toBe(1);
+    expect(calls.some((call) => call.url.endsWith("/cancel"))).toBe(true);
+  });
+
   it("probes the job-declared judge alongside the main provider", async () => {
     installProviderMock(() => providerJson({ id: "resp_unused", status: "queued" }));
 
@@ -480,6 +519,36 @@ describe("operator API fragment recovery and guard regressions", () => {
 
     expect(html).not.toContain("<img src=x");
     expect(html).toContain("&lt;img");
+  });
+
+  it("renders Pause Job for a running job and Resume Job once paused", async () => {
+    installProviderMock(() => providerJson({ id: "resp_pause_view", status: "queued" }));
+
+    const jobId = nextJobId("job_operator_fragment_pause");
+    const created = await postJob(jobId);
+    expect(created.status).toBe(201);
+    trackJobId(jobId);
+    await waitForJobStatus(jobId, ["running"]);
+
+    const running = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/fragment`,
+    );
+    expect(running.status).toBe(200);
+    const runningHtml = await running.text();
+    expect(runningHtml).toContain("Pause Job");
+    expect(runningHtml).not.toContain("Resume Job");
+
+    const paused = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/pause`, {
+      method: "POST",
+      headers: { origin: APP_ORIGIN },
+    });
+    expect(paused.status).toBe(200);
+
+    const held = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/fragment`);
+    expect(held.status).toBe(200);
+    const heldHtml = await held.text();
+    expect(heldHtml).toContain("Resume Job");
+    expect(heldHtml).not.toContain("Pause Job");
   });
 
   it("renders the external response anchor and any active response in the job fragment", async () => {

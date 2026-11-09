@@ -218,6 +218,12 @@ function renumberTurns() {
       const filesLabel = files.closest("p")?.querySelector("label") ?? null;
       if (filesLabel !== null) filesLabel.htmlFor = files.id;
     }
+
+    const pinned = block.querySelector(".turn-pinned");
+    if (pinned instanceof HTMLInputElement) {
+      pinned.id = "turn-" + turnIndex + "-pinned";
+      pinned.setAttribute("aria-label", "Pin turn " + turnIndex + " in replay window");
+    }
   });
 }
 
@@ -252,6 +258,8 @@ function resetTurns() {
   if (tokenResult !== null) setTurnTokenResult(tokenResult, "");
   const countButton = firstBlock === null ? null : firstBlock.querySelector(".turn-count");
   if (countButton instanceof HTMLButtonElement) countButton.disabled = false;
+  const pinned = firstBlock === null ? null : firstBlock.querySelector(".turn-pinned");
+  if (pinned instanceof HTMLInputElement) pinned.checked = false;
   renumberTurns();
 }
 
@@ -265,7 +273,9 @@ function collectTurnSpecs() {
     const filesInput = block.querySelector(".turn-files");
     const files =
       filesInput === null || filesInput.files === null ? [] : Array.from(filesInput.files);
-    specs.push({ turnIndex: specs.length + 1, promptText, files });
+    const pinnedInput = block.querySelector(".turn-pinned");
+    const pinnedInReplay = pinnedInput instanceof HTMLInputElement && pinnedInput.checked;
+    specs.push({ turnIndex: specs.length + 1, promptText, files, pinnedInReplay });
   }
   if (specs.length === 0) {
     throw new Error("Add at least one turn prompt before creating the job.");
@@ -516,6 +526,7 @@ async function createJob(event) {
         turnIndex: turnSpec.turnIndex,
         promptText: turnSpec.promptText,
         attachmentFileIds,
+        pinnedInReplay: turnSpec.pinnedInReplay === true,
       });
     }
 
@@ -940,6 +951,7 @@ async function handleDialogAction(control) {
     action !== "pause-job" &&
     action !== "resume-job" &&
     action !== "retry-turn" &&
+    action !== "toggle-pin" &&
     action !== "check-health" &&
     action !== "inspect-jsonl"
   ) {
@@ -980,6 +992,25 @@ async function handleDialogAction(control) {
       response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/resume", {
         method: "POST",
       });
+    } else if (action === "toggle-pin") {
+      const rawTurnIndex = control.getAttribute("data-turn-index");
+      const turnIndex = Number(rawTurnIndex);
+      if (rawTurnIndex === null || !Number.isSafeInteger(turnIndex) || turnIndex <= 0) {
+        throw new Error("Turn index is missing or invalid.");
+      }
+      const pinned = control.getAttribute("data-pinned") !== "true";
+      response = await fetch(
+        "/api/jobs/" +
+          encodeURIComponent(jobId) +
+          "/turns/" +
+          encodeURIComponent(String(turnIndex)) +
+          "/pin",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pinned }),
+        },
+      );
     } else {
       const rawTurnIndex = control.getAttribute("data-turn-index");
       const turnIndex = Number(rawTurnIndex);

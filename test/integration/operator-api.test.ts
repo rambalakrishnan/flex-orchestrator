@@ -23,7 +23,7 @@ interface JobView {
   readonly acceptedTurnCount: number;
   readonly lastAcceptedResponseId: string | null;
   readonly warningMessages: readonly string[];
-  readonly config: { readonly model: string };
+  readonly config: { readonly model: string; readonly judge?: { readonly model: string } };
 }
 
 interface ActiveAttemptView {
@@ -32,6 +32,7 @@ interface ActiveAttemptView {
 
 interface JobStateBody {
   readonly job: JobView;
+  readonly turns: ReadonlyArray<{ readonly pinnedInReplay: boolean }>;
   readonly activeAttempt?: ActiveAttemptView | null;
 }
 
@@ -444,6 +445,44 @@ describe("operator API diagnostics", () => {
     expect(resumedBody.job.status).toBe("running");
     expect(resumedBody.job.currentTurnIndex).toBe(1);
     expect(calls.some((call) => call.url.endsWith("/cancel"))).toBe(true);
+  });
+
+  it("toggles a turn replay pin and rejects malformed pin bodies", async () => {
+    installProviderMock(() => providerJson({ id: "resp_pin_route", status: "queued" }));
+
+    const jobId = nextJobId("job_operator_pin");
+    const created = await postJob(jobId);
+    expect(created.status).toBe(201);
+    trackJobId(jobId);
+    await waitForJobStatus(jobId, ["running"]);
+
+    const pin = async (pinned: unknown): Promise<Response> =>
+      mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/turns/1/pin`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: APP_ORIGIN },
+        body: JSON.stringify({ pinned }),
+      });
+
+    const pinned = await pin(true);
+    expect(pinned.status).toBe(200);
+    const pinnedBody = (await pinned.json()) as JobStateBody;
+    expect(pinnedBody.turns[0]!.pinnedInReplay).toBe(true);
+
+    const unpinned = await pin(false);
+    expect(unpinned.status).toBe(200);
+    const unpinnedBody = (await unpinned.json()) as JobStateBody;
+    expect(unpinnedBody.turns[0]!.pinnedInReplay).toBe(false);
+
+    const malformed = await pin("yes");
+    expect(malformed.status).toBe(400);
+    const malformedBody = (await malformed.json()) as ErrorBody;
+    expect(malformedBody.error.code).toBe("invalid_request_body");
+
+    const fragment = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/fragment`,
+    );
+    expect(fragment.status).toBe(200);
+    expect(await fragment.text()).toContain('data-action="toggle-pin"');
   });
 
   it("replaces the judge config while halted and rejects edits while running", async () => {

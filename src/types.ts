@@ -336,6 +336,7 @@ export interface TurnPromptSpec {
   readonly turnIndex: TurnIndex;
   readonly promptText: string;
   readonly attachmentFileIds: readonly FileId[];
+  readonly pinnedInReplay?: boolean;
 }
 
 export interface TurnRecord {
@@ -344,6 +345,7 @@ export interface TurnRecord {
   readonly status: TurnStatus;
   readonly promptText: string;
   readonly attachmentFileIds: readonly FileId[];
+  readonly pinnedInReplay: boolean;
   readonly continuationsUsed: number;
   readonly activeAttemptId: AttemptId | null;
   readonly acceptedAttemptId: AttemptId | null;
@@ -430,12 +432,16 @@ export interface UsageAggregate {
   readonly judgeCalls: number;
   readonly missingUsageCalls: number;
   readonly unknownPricingCalls: number;
+  readonly unknownJudgePricingCalls: number;
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
   readonly outputTokens: number;
   readonly reasoningTokens: number;
   readonly totalTokens: number;
+  readonly judgeTokens: number;
   readonly totalEstimatedCostUsd: number | null;
+  readonly generationCostUsd: number | null;
+  readonly judgeCostUsd: number | null;
 }
 
 export type TokenAdmissionOutcome =
@@ -721,6 +727,7 @@ export interface CreateJobCommand {
 export interface AppendTurnCommand {
   readonly promptText: string;
   readonly attachmentFileIds: readonly FileId[];
+  readonly pinnedInReplay?: boolean;
 }
 
 export type OperatorReviewDecision =

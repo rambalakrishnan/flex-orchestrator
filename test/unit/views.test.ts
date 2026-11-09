@@ -53,6 +53,7 @@ function jobState(overrides: Partial<JobStateResponse> = {}): JobStateResponse {
         status: "accepted",
         promptText: "Write the first section.",
         attachmentFileIds: [],
+        pinnedInReplay: false,
         continuationsUsed: 0,
         activeAttemptId: null,
         acceptedAttemptId: "job_views:t1:a1",
@@ -72,12 +73,16 @@ function jobState(overrides: Partial<JobStateResponse> = {}): JobStateResponse {
       judgeCalls: 1,
       missingUsageCalls: 0,
       unknownPricingCalls: 0,
+      unknownJudgePricingCalls: 0,
       inputTokens: 12,
       cachedInputTokens: 0,
       outputTokens: 8,
       reasoningTokens: 0,
       totalTokens: 20,
-      totalEstimatedCostUsd: null,
+      judgeTokens: 6,
+      totalEstimatedCostUsd: 0.0025,
+      generationCostUsd: 0.002,
+      judgeCostUsd: 0.0005,
     },
     pollIntervalMs: 12_000,
     ...overrides,
@@ -90,7 +95,7 @@ function turnRow(overrides: Partial<TurnSummaryRow> = {}): TurnSummaryRow {
     status: "accepted",
     prompt_bytes: 24,
     row_bytes: 128,
-    attachment_file_ids_json: "[]",
+    pinned_in_replay: 0,
     accepted_candidate_id: "job_views:t1:a1:candidate",
     accepted_attempt_id: "job_views:t1:a1",
     accepted_response_id: "resp_accepted",
@@ -174,5 +179,73 @@ describe("long-form preview expanders", () => {
     expect(html).toContain('data-expand-id="deliverable-turn-1"');
     expect(html).not.toContain('data-expand-id="judge-comment-');
     expect(html).toContain('<span class="muted">—</span>');
+  });
+});
+
+describe("usage cost split", () => {
+  it("renders generation, judge, and combined cost lines", () => {
+    const html = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [turnRow()],
+      attempts(),
+      [judgeRow()],
+    );
+
+    expect(html).toContain("<dt>Generation cost</dt><dd>$0.0020</dd>");
+    expect(html).toContain("Judge cost</dt><dd>$0.0005");
+    expect(html).toContain("(6 tokens)");
+    expect(html).toContain("<dt>Combined cost</dt><dd>$0.0025</dd>");
+  });
+
+  it("marks unknown judge pricing without hiding the generation line", () => {
+    const html = renderJobDetail(
+      jobState({
+        usage: {
+          generationCalls: 1,
+          judgeCalls: 1,
+          missingUsageCalls: 0,
+          unknownPricingCalls: 1,
+          unknownJudgePricingCalls: 1,
+          inputTokens: 12,
+          cachedInputTokens: 0,
+          outputTokens: 8,
+          reasoningTokens: 0,
+          totalTokens: 20,
+          judgeTokens: 6,
+          totalEstimatedCostUsd: null,
+          generationCostUsd: 0.002,
+          judgeCostUsd: null,
+        },
+      }),
+      deliverables("Short deliverable."),
+      [turnRow()],
+      attempts(),
+      [judgeRow()],
+    );
+
+    expect(html).toContain("<dt>Generation cost</dt><dd>$0.0020</dd>");
+    expect(html).toContain("Judge cost</dt><dd><span class=\"muted\">unknown pricing</span>");
+    expect(html).toContain(
+      "Combined cost</dt><dd><span class=\"muted\">unknown pricing</span>",
+    );
+  });
+});
+
+describe("turn replay pins", () => {
+  it("renders Pin/Unpin toggles reflecting stored pin state", () => {
+    const html = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [turnRow(), turnRow({ turn_index: 2, pinned_in_replay: 1 })],
+      attempts(),
+      [judgeRow()],
+    );
+
+    expect(html).toContain('data-action="toggle-pin"');
+    expect(html).toContain('data-turn-index="1" data-pinned="false"');
+    expect(html).toContain('data-turn-index="2" data-pinned="true"');
+    expect(html).toContain(">Pin</button>");
+    expect(html).toContain(">Unpin</button>");
   });
 });

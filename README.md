@@ -132,7 +132,7 @@ Token counting:
 - **Health Check** probes the provider status summary and model list for the main provider; inside a job's detail it also probes the configured judge provider and checks both configured model IDs.
 - After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value. Provider response IDs are shown for each accepted turn and its latest attempt.
 
-Generation uses Flex background Responses and never falls back to standard tier. Turns chain server-side through `previous_response_id`; when the last accepted turn's frozen input crosses the model's long-context threshold (or 80% of max input for models without one), the next turn re-anchors to a fresh chain replaying only the two most recent turns, recorded as a `history_reanchored_at_turn:N` warning. This bounds worst-case billed input instead of accumulating the full chain.
+Generation uses Flex background Responses and never falls back to standard tier. Turns chain server-side through `previous_response_id`; when the last accepted turn's frozen input crosses the model's long-context threshold (or 80% of max input for models without one), the next turn re-anchors to a fresh chain replaying only pinned turns plus the two most recent unpinned turns, recorded as a `history_reanchored_at_turn:N` warning. Pin foundational turns at creation (“Pin in replay window”) or later from the turn table; this bounds worst-case billed input instead of accumulating the full chain. Usage shows generation and judge cost as separate lines so an unpriced judge model never hides the main-loop total.
 
 ### Monitoring, recovery, branching, and exports
 

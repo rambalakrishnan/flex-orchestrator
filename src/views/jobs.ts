@@ -71,17 +71,19 @@ export function renderJobList(jobs: readonly JobSummaryItem[]): string {
 
 function renderUsageSummary(job: JobStateResponse): string {
   const { usage } = job;
-  const cost =
-    usage.totalEstimatedCostUsd === null
-      ? ""
-      : `<div><dt>Cost</dt><dd>${escapeHtml(`$${usage.totalEstimatedCostUsd.toFixed(4)}`)}</dd></div>`;
+  const costCell = (value: number | null): string =>
+    value === null
+      ? `<span class="muted">unknown pricing</span>`
+      : escapeHtml(`$${value.toFixed(4)}`);
 
   return [
     `<dl class="usage-summary">`,
     renderCount("Generation calls", usage.generationCalls),
     renderCount("Judge calls", usage.judgeCalls),
     renderCount("Total tokens", usage.totalTokens),
-    cost,
+    `<div><dt>Generation cost</dt><dd>${costCell(usage.generationCostUsd)}</dd></div>`,
+    `<div><dt>Judge cost</dt><dd>${costCell(usage.judgeCostUsd)}${usage.judgeCalls > 0 ? ` <span class="muted">(${escapeHtml(String(usage.judgeTokens))} tokens)</span>` : ""}</dd></div>`,
+    `<div><dt>Combined cost</dt><dd>${costCell(usage.totalEstimatedCostUsd)}</dd></div>`,
     `</dl>`,
   ].join("");
 }
@@ -439,6 +441,8 @@ function renderTurnsTable(
       turn.turn_index === job.job.currentTurnIndex
         ? renderRetryTurnButton(job.job.jobId, turn.turn_index)
         : `<span class="muted">—</span>`;
+    const pinned = turn.pinned_in_replay === 1;
+    const pinAction = `<button type="button" class="action-button" data-action="toggle-pin" data-job-id="${escapeHtml(job.job.jobId)}" data-turn-index="${escapeHtml(String(turn.turn_index))}" data-pinned="${pinned ? "true" : "false"}" aria-pressed="${pinned ? "true" : "false"}">${pinned ? "Unpin" : "Pin"}</button>`;
 
     return renderTableRow([
       escapeHtml(String(turn.turn_index)),
@@ -448,7 +452,7 @@ function renderTurnsTable(
       renderResponseId(latestProviderResponse),
       renderOptionalText(turn.marginal_input_tokens),
       renderTime(turn.updated_at),
-      `<div class="turn-actions">${retryAction}</div>`,
+      `<div class="turn-actions">${retryAction}${pinAction}</div>`,
     ]);
   });
 

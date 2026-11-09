@@ -36,6 +36,7 @@ export interface InsertTurnInput {
   readonly attachmentFileIdsJson?: string;
   readonly status?: TurnRow["status"];
   readonly marginalInputTokens?: number | null;
+  readonly pinnedInReplay?: boolean;
   readonly nowIso: string;
 }
 
@@ -108,6 +109,7 @@ export function insertTurn(
         prompt_blob,
         prompt_bytes,
         row_bytes,
+        pinned_in_replay,
         attachment_file_ids_json,
         accepted_candidate_id,
         accepted_attempt_id,
@@ -116,12 +118,13 @@ export function insertTurn(
         marginal_input_tokens,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?)`,
       input.turnIndex,
       status,
       promptBlob,
       promptBytes,
       rowBytes,
+      input.pinnedInReplay === true ? 1 : 0,
       attachmentFileIdsJson,
       marginalInputTokens,
       input.nowIso,
@@ -133,6 +136,7 @@ export function insertTurn(
       status,
       prompt_bytes: promptBytes,
       row_bytes: rowBytes,
+      pinned_in_replay: input.pinnedInReplay === true ? 1 : 0,
       attachment_file_ids_json: attachmentFileIdsJson,
       accepted_candidate_id: null,
       accepted_attempt_id: null,
@@ -272,6 +276,26 @@ export function updateTurnStatus(
         turnIndex
       );
     }
+  });
+}
+
+/**
+ * Sets a turn's replay pin, which keeps the accepted turn in the bounded
+ * replay window after a history re-anchor.
+ */
+export function updateTurnPinnedInReplay(
+  sql: SchemaSqlStorage,
+  turnIndex: number,
+  pinned: boolean,
+  nowIso: string
+): void {
+  withSqlErrorMapping(() => {
+    sql.exec(
+      "UPDATE turns SET pinned_in_replay = ?, updated_at = ? WHERE turn_index = ?",
+      pinned ? 1 : 0,
+      nowIso,
+      turnIndex
+    );
   });
 }
 

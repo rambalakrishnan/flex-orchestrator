@@ -36,6 +36,7 @@ interface JobDoTestStub {
   pauseJob(): Promise<JobStateResponse>;
   resumeJob(): Promise<JobStateResponse>;
   retryTurn(turnIndex: number): Promise<JobStateResponse>;
+  setTurnPinned(turnIndex: number, pinned: boolean): Promise<JobStateResponse>;
   captureBranchSnapshot(
     forkTurnIndex: number
   ): Promise<
@@ -614,6 +615,106 @@ describe("JobDO generation lifecycle", () => {
     if (reanchored === null) throw new Error("expected job state");
     expect(reanchored.job.lastAcceptedResponseId).toBeNull();
     expect(reanchored.job.warningMessages).toContain("history_reanchored_at_turn:4");
+  });
+
+  it("keeps pinned turns in the replay window past the trailing window", async () => {
+    const jobId = nextJobId();
+    const bodiesByResponse: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const method = init?.method ?? "GET";
+        if (method === "POST" && url.endsWith("/responses")) {
+          const turnIndex = Object.keys(bodiesByResponse).length + 1;
+          const responseId = `resp_pin_${turnIndex}`;
+          bodiesByResponse[responseId] = `turn ${turnIndex} <!-- TURN_END:${turnIndex} -->`;
+          return new Response(
+            JSON.stringify({ id: responseId, model: "gpt-5", status: "queued" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const match = /\/responses\/(resp_pin_\d+)$/.exec(url);
+        if (method === "GET" && match !== null) {
+          const responseId = match[1]!;
+          const turnIndex = Number(responseId.split("_").pop());
+          return new Response(
+            JSON.stringify({
+              id: responseId,
+              model: "gpt-5",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: bodiesByResponse[responseId] }],
+                },
+              ],
+              usage: {
+                input_tokens: turnIndex >= 4 ? 300_000 : 12,
+                output_tokens: 8,
+                total_tokens: turnIndex >= 4 ? 300_008 : 20,
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected provider call: ${method} ${url}`);
+      }),
+    );
+    const stub = stubFor(jobId);
+
+    await stub.createJob({
+      jobId,
+      title: "pinned replay job",
+      config: JOB_CONFIG,
+      initialTurns: [
+        { turnIndex: 1, promptText: "Turn 1.", attachmentFileIds: [], pinnedInReplay: true },
+        { turnIndex: 2, promptText: "Turn 2.", attachmentFileIds: [] },
+        { turnIndex: 3, promptText: "Turn 3.", attachmentFileIds: [] },
+        { turnIndex: 4, promptText: "Turn 4.", attachmentFileIds: [] },
+        { turnIndex: 5, promptText: "Turn 5.", attachmentFileIds: [] },
+      ],
+    });
+    const created = await stub.getState();
+    if (created === null) throw new Error("expected job state");
+    expect(created.turns[0]!.pinnedInReplay).toBe(true);
+    expect(created.turns[1]!.pinnedInReplay).toBe(false);
+
+    for (let turn = 1; turn <= 4; turn += 1) {
+      await stub.receiveWebhookDelivery({
+        webhookId: `wh_pin_${turn}`,
+        timestampSeconds: 1_760_000_000,
+        eventType: "response.completed",
+        responseId: `resp_pin_${turn}`,
+        rawPayload: new ArrayBuffer(0),
+        receivedAtMs: 1_760_000_000_000,
+      });
+    }
+
+    const running = await stub.getState();
+    if (running === null) throw new Error("expected job state");
+    expect(running.job.status).toBe("running");
+    expect(running.job.currentTurnIndex).toBe(5);
+    if (running.activeAttempt === null) throw new Error("expected active attempt");
+    const requestArtifact = await stub.readArtifact({
+      kind: "attempt_request",
+      id: running.activeAttempt.attemptId,
+    });
+    expect(requestArtifact).not.toBeNull();
+    const request = JSON.parse(new TextDecoder().decode(requestArtifact!.bytes)) as {
+      previous_response_id?: string;
+      input: Array<{ role?: string; content?: Array<{ text?: string }> }>;
+    };
+    expect("previous_response_id" in request).toBe(false);
+    const replayedTexts = request.input
+      .filter((item) => item.role === "assistant")
+      .flatMap((item) => (item.content ?? []).map((part) => part.text ?? ""));
+    expect(replayedTexts).toEqual(["turn 1", "turn 3", "turn 4"]);
+
+    const unpinned = await stub.setTurnPinned(1, false);
+    expect(unpinned.turns[0]!.pinnedInReplay).toBe(false);
   });
 
   it("captures a quiescent branch snapshot and initializes the child in one transaction", async () => {

@@ -315,7 +315,9 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] A declared Chat Completions stateful judge produces an advisory warning (not a substitution).
 - [ ] A Chat Completions judge evaluates end-to-end: a valid verdict JSON completes the call, grades normalize, and the candidate accepts on PASS.
 - [ ] Judge configuration edits while halted persist and surface in the detail fragment; edits while running return 409 `job_not_halted` and malformed configs return 400 `invalid_judge_config`.
-- [ ] A chain whose frozen input crosses the model's threshold re-anchors: the next request carries no `previous_response_id`, replays at most two turns, clears the anchor, and records `history_reanchored_at_turn:N`.
+- [ ] A chain whose frozen input crosses the model's threshold re-anchors: the next request carries no `previous_response_id`, replays pinned turns plus at most two recent unpinned turns, clears the anchor, and records `history_reanchored_at_turn:N`.
+- [ ] Pinned turns always replay after a re-anchor alongside the trailing window; pins toggle from the turn table and persist on new, appended, and branched turns.
+- [ ] Usage splits generation and judge cost lines; unknown judge pricing nulls only the judge line and the combined total, never the generation line.
 - [ ] A judge infrastructure failure accepts with a warning; the original judge result is preserved.
 - [ ] A judge rejection with "Inject Critique on Failure" retries with the critique visible in the retry prompt; disabling it retries without the critique and the budget still bounds retries.
 - [ ] A passing judge with "Steer Next Turn on Pass" appends the PM steering note to the next turn prompt; disabling it leaves the next prompt unchanged.

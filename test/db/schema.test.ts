@@ -996,6 +996,30 @@ describe("schema DDL validation", () => {
       insertTurn(1, "awaiting_judge");
       insertTurn(2, "accepted_with_warning");
       expect(countRows(storage, "turns")).toBe(2);
+      const pins = storage.sql
+        .exec<{ pinned_in_replay: number }>(
+          "SELECT pinned_in_replay FROM turns ORDER BY turn_index",
+        )
+        .toArray();
+      expect(pins).toEqual([{ pinned_in_replay: 0 }, { pinned_in_replay: 0 }]);
+
+      expectRejectedInsert(
+        storage,
+        "turns",
+        `INSERT INTO turns (
+           turn_index, status, prompt_blob, prompt_bytes, row_bytes,
+           pinned_in_replay, attachment_file_ids_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        3,
+        "pending",
+        prompt.blob,
+        prompt.byteLength,
+        prompt.byteLength,
+        2,
+        "[]",
+        NOW_ISO,
+        NOW_ISO
+      );
 
       expectRejectedInsert(
         storage,

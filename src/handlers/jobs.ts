@@ -114,6 +114,7 @@ interface JobDoRpcStub {
   resumeJob(): Promise<JobStateResponse>;
   retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse>;
   updateJudgeConfig(config: unknown): Promise<JobStateResponse>;
+  setTurnPinned(turnIndex: TurnIndex, pinned: boolean): Promise<JobStateResponse>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
   initializeBranch(snapshot: BranchSnapshot): Promise<BranchCreationOutcome>;
   listTurns(
@@ -224,6 +225,22 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
       return notFound();
     }
     return retryTurn(env, jobId, rawTurnIndex);
+  }
+  if (
+    subpath.length === 3 &&
+    subpath[0] === "turns" &&
+    subpath[2] === "pin"
+  ) {
+    if (method !== "POST") {
+      return methodNotAllowed(["POST"]);
+    }
+    assertApplicationOrigin(request, env);
+    rejectUnknownQuery(url, []);
+    const rawTurnIndex = subpath[1];
+    if (rawTurnIndex === undefined) {
+      return notFound();
+    }
+    return setTurnPin(request, env, jobId, rawTurnIndex);
   }
   if (subpath.length !== 1) {
     return notFound();
@@ -480,6 +497,31 @@ async function retryTurn(
   const stub = getJobStub(env, jobId);
   try {
     return jsonResponse(await stub.retryTurn(turnIndex));
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+async function setTurnPin(
+  request: Request,
+  env: Env,
+  jobId: JobId,
+  rawTurnIndex: string,
+): Promise<Response> {
+  const turnIndex = parsePathTurnIndex(rawTurnIndex);
+  const parsedBody = await readControlJson(request);
+  const body = requireRecord(
+    parsedBody,
+    400,
+    "invalid_request_body",
+    "Request body must be a JSON object",
+  );
+  if (typeof body.pinned !== "boolean") {
+    throw new HttpError(400, "invalid_request_body", "pinned must be a boolean");
+  }
+  const stub = getJobStub(env, jobId);
+  try {
+    return jsonResponse(await stub.setTurnPinned(turnIndex, body.pinned));
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
@@ -1669,6 +1711,10 @@ function parseCreateJobCommand(value: unknown): CreateJobCommand {
         turn.attachmentFileIds,
         `initialTurns[${index}].attachmentFileIds`,
       ),
+      pinnedInReplay: parseOptionalBoolean(
+        turn.pinnedInReplay,
+        `initialTurns[${index}].pinnedInReplay`,
+      ),
     });
   }
 
@@ -1694,6 +1740,7 @@ function parseAppendTurnCommand(value: unknown): AppendTurnCommand {
       body.attachmentFileIds,
       "attachmentFileIds",
     ),
+    pinnedInReplay: parseOptionalBoolean(body.pinnedInReplay, "pinnedInReplay"),
   };
 }
 
@@ -1815,6 +1862,20 @@ function requireString(value: unknown, label: string): string {
       400,
       "invalid_request_body",
       `${label} must be a string`,
+    );
+  }
+  return value;
+}
+
+function parseOptionalBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new HttpError(
+      400,
+      "invalid_request_body",
+      `${label} must be a boolean`,
     );
   }
   return value;
@@ -2139,6 +2200,9 @@ function rpcErrorResponse(err: unknown): Response {
   }
   if (message.includes("pauseJob requires an active job")) {
     return conflict("Job is not in a pausable state", "job_not_pausable");
+  }
+  if (message.includes("setTurnPinned requires a non-terminal job")) {
+    return conflict("Turn pins cannot change on a terminal job", "job_terminal");
   }
   if (message.includes("updateJudgeConfig requires a halted or ready job")) {
     return conflict("Judge configuration can only change while the job is halted", "job_not_halted");

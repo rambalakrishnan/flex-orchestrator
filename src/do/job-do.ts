@@ -44,6 +44,7 @@ import {
   insertTurnCandidate,
   listTurnCandidateSummaries,
   listTurnSummaries,
+  updateTurnPinnedInReplay,
   updateTurnPrompt,
   updateTurnStatus,
 } from "../db/turns.ts";
@@ -883,6 +884,7 @@ function turnRowToRecord(
     status: row.status,
     promptText,
     attachmentFileIds: readStringArray(row.attachment_file_ids_json),
+    pinnedInReplay: row.pinned_in_replay === 1,
     continuationsUsed: 0,
     activeAttemptId,
     acceptedAttemptId: row.accepted_attempt_id,
@@ -975,6 +977,7 @@ export class JobDO extends DurableObject<Env> {
             prompt: turn.promptText,
             attachmentFileIdsJson: JSON.stringify(turn.attachmentFileIds),
             status: "pending",
+            pinnedInReplay: turn.pinnedInReplay,
             nowIso,
           });
         }
@@ -1045,6 +1048,9 @@ export class JobDO extends DurableObject<Env> {
     if (!Array.isArray(command.attachmentFileIds)) {
       throw new Error("AppendTurnCommand.attachmentFileIds must be an array");
     }
+    if (command.pinnedInReplay !== undefined && typeof command.pinnedInReplay !== "boolean") {
+      throw new Error("AppendTurnCommand.pinnedInReplay must be a boolean");
+    }
 
     const lastIndex = this.getLastTurnIndex();
     const nextIndex = lastIndex + 1;
@@ -1062,6 +1068,7 @@ export class JobDO extends DurableObject<Env> {
         prompt: command.promptText,
         attachmentFileIdsJson: JSON.stringify(uniqueStrings(command.attachmentFileIds)),
         status: "pending",
+        pinnedInReplay: command.pinnedInReplay,
         nowIso,
       });
       withSqlErrorMapping(() => {
@@ -1339,6 +1346,29 @@ export class JobDO extends DurableObject<Env> {
   }
 
   /**
+   * Pins or unpins a turn for replay-window retention after a history
+   * re-anchor. Metadata-only and safe in any non-terminal state; terminal
+   * jobs are immutable.
+   */
+  async setTurnPinned(turnIndex: TurnIndex, pinned: boolean): Promise<JobStateResponse> {
+    const job = requireJob(this.sql);
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      throw new Error(
+        `setTurnPinned requires a non-terminal job; current status is ${job.status}`
+      );
+    }
+    const index = assertTurnIndex(turnIndex, "setTurnPinned.turnIndex");
+    const turn = getTurnSummary(this.sql, index);
+    if (turn === null) {
+      throw new Error(`Turn not found: ${index}`);
+    }
+    this.storage.transactionSync(() => {
+      updateTurnPinnedInReplay(this.sql, index, pinned, toIso(now()));
+    });
+    return this.requireState();
+  }
+
+  /**
    * Re-registers every file reference the recovered turn may re-send after a
    * failed job released its references and opened the retention window.
    */
@@ -1590,6 +1620,7 @@ export class JobDO extends DurableObject<Env> {
           prompt: turn.promptText,
           attachmentFileIdsJson: JSON.stringify(turn.attachmentFileIds),
           status: "pending",
+          pinnedInReplay: turn.pinnedInReplay,
           nowIso,
         });
 
@@ -2129,6 +2160,9 @@ export class JobDO extends DurableObject<Env> {
       if (!Array.isArray(turn.attachmentFileIds)) {
         throw new Error(`Initial turn ${turn.turnIndex} attachmentFileIds must be an array`);
       }
+      if (turn.pinnedInReplay !== undefined && typeof turn.pinnedInReplay !== "boolean") {
+        throw new Error(`Initial turn ${turn.turnIndex} pinnedInReplay must be a boolean`);
+      }
     });
   }
 
@@ -2495,6 +2529,7 @@ export class JobDO extends DurableObject<Env> {
         turnIndex: summary.turn_index,
         deliverableText: text,
         attachmentFileIds: readStringArray(summary.attachment_file_ids_json),
+        pinnedInReplay: summary.pinned_in_replay === 1,
       });
     }
     return prior;
@@ -2502,10 +2537,11 @@ export class JobDO extends DurableObject<Env> {
 
   private loadRecentAcceptedTurns(turnIndex: TurnIndex, count: number): PriorAcceptedTurn[] {
     const prior = this.loadPriorAcceptedTurns(turnIndex);
-    if (prior.length <= count) {
-      return prior;
-    }
-    return prior.slice(prior.length - count);
+    const pinned = prior.filter((turn) => turn.pinnedInReplay === true);
+    const pinnedIndexes = new Set(pinned.map((turn) => turn.turnIndex));
+    const recent = prior.filter((turn) => !pinnedIndexes.has(turn.turnIndex));
+    const window = recent.length <= count ? recent : recent.slice(recent.length - count);
+    return [...pinned, ...window].sort((a, b) => a.turnIndex - b.turnIndex);
   }
 
   private prepareGenerationAttempt(

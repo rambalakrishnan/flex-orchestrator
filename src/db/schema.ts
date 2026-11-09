@@ -17,7 +17,7 @@ import {
 import { ArtifactGuardError } from "../lib/guards.ts";
 
 /** Current schema version for `JobDO`, `RouterDO`, and `RegistryDO`. */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 // ============================================================================
 // Minimal Structural SQL Interfaces (Compatible with Cloudflare SqlStorage)
@@ -271,6 +271,7 @@ CREATE TABLE IF NOT EXISTS turns (
     )
   ),
   prompt_blob BLOB NOT NULL CHECK (length(prompt_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
+  pinned_in_replay INTEGER NOT NULL DEFAULT 0 CHECK (pinned_in_replay IN (0, 1)),
   prompt_bytes INTEGER NOT NULL CHECK (
     prompt_bytes >= 0 AND
     prompt_bytes <= ${ARTIFACT_ROW_GUARD_BYTES} AND
@@ -824,6 +825,7 @@ export interface TurnSummaryRow extends Record<string, SqlPrimitiveValue> {
     | "cancelled";
   prompt_bytes: number;
   row_bytes: number;
+  pinned_in_replay: number;
   attachment_file_ids_json: string;
   accepted_candidate_id: string | null;
   accepted_attempt_id: string | null;
@@ -1051,7 +1053,7 @@ export interface JobFileRefRow extends Record<string, SqlPrimitiveValue> {
 // ============================================================================
 
 export const TURNS_SUMMARY_COLUMNS =
-  "turn_index, status, prompt_bytes, row_bytes, attachment_file_ids_json, accepted_candidate_id, accepted_attempt_id, accepted_response_id, accepted_with_warning, marginal_input_tokens, created_at, updated_at";
+  "turn_index, status, prompt_bytes, row_bytes, pinned_in_replay, attachment_file_ids_json, accepted_candidate_id, accepted_attempt_id, accepted_response_id, accepted_with_warning, marginal_input_tokens, created_at, updated_at";
 
 export const TURN_CANDIDATES_SUMMARY_COLUMNS =
   "candidate_id, turn_index, attempt_id, structural_status, parsed_tag_index, deliverable_bytes, row_bytes, accepted, warning_json, created_at";
@@ -1073,6 +1075,14 @@ export interface SchemaMigrationStep {
   readonly version: number;
   readonly statements: readonly string[];
   readonly indexStatements?: readonly string[];
+  /**
+   * Optional guard evaluated before running `statements`. When it returns
+   * true the statements are skipped but the version is still recorded as
+   * applied — used for `ADD COLUMN` steps, which fail on fresh databases
+   * where the v1 DDL already declares the column (SQLite has no
+   * `ADD COLUMN IF NOT EXISTS`).
+   */
+  readonly skipIfPresent?: (sql: SchemaSqlStorage) => boolean;
 }
 
 export const JOB_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
@@ -1113,6 +1123,16 @@ export const JOB_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
       "DROP TABLE jobs_v1;",
     ],
   },
+  {
+    // ADD COLUMN is safe in place (unlike the v2 CHECK rebuild): existing
+    // rows default to unpinned. Skipped on fresh databases where the v1 DDL
+    // already declares the column.
+    version: 3,
+    statements: [
+      "ALTER TABLE turns ADD COLUMN pinned_in_replay INTEGER NOT NULL DEFAULT 0 CHECK (pinned_in_replay IN (0, 1));",
+    ],
+    skipIfPresent: (sql) => hasTableColumn(sql, "turns", "pinned_in_replay"),
+  },
 ];
 export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
   {
@@ -1124,6 +1144,11 @@ export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
     // RouterDO carries no job-status CHECK; the empty step keeps its
     // recorded version aligned with the shared CURRENT_SCHEMA_VERSION.
     version: 2,
+    statements: [],
+  },
+  {
+    // Alignment-only step; see the v2 comment above.
+    version: 3,
     statements: [],
   },
 ];
@@ -1148,6 +1173,11 @@ export const REGISTRY_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
        FROM job_index_v1;`,
       "DROP TABLE job_index_v1;",
     ],
+  },
+  {
+    // RegistryDO carries no turns table; alignment-only step.
+    version: 3,
+    statements: [],
   },
 ];
 
@@ -1216,10 +1246,14 @@ export function runSchemaMigrations(
       }
 
       let createdIndexes = false;
+      const skipStatements =
+        step.skipIfPresent !== undefined && step.skipIfPresent(sql);
       try {
         storage.transactionSync(() => {
-          for (const stmt of step.statements) {
-            sql.exec(stmt);
+          if (!skipStatements) {
+            for (const stmt of step.statements) {
+              sql.exec(stmt);
+            }
           }
           if (step.indexStatements && step.indexStatements.length > 0) {
             for (const indexStmt of step.indexStatements) {

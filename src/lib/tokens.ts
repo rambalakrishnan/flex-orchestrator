@@ -159,38 +159,61 @@ export interface AggregateUsageParams {
 /**
  * Aggregates recorded per-call usage without inventing values.
  *
- * Calls whose usage was not returned count as `missingUsageCalls`. Calls with
- * `pricingKnown: false` count as `unknownPricingCalls` and force
- * `totalEstimatedCostUsd` to `null` (no partial estimate is presented as a total).
+ * Costs are split by pipeline. Calls whose usage was not returned count as
+ * `missingUsageCalls`. Calls with `pricingKnown: false` count as
+ * `unknownPricingCalls`; each pipeline's cost line nulls only on its own
+ * unknown pricing, so an unpriced judge model never poisons the generation
+ * total. `totalEstimatedCostUsd` is the combined sum, null unless both lines
+ * are known.
  */
 export function aggregateUsage(params: AggregateUsageParams): UsageAggregate {
   const generationUsage = params.generationUsage;
   const judgeUsage = params.judgeUsage;
-  const allKnown = [...generationUsage, ...judgeUsage].filter(
+  const knownGeneration = generationUsage.filter(
     (record): record is TokenUsageRecord => record !== null,
   );
+  const knownJudge = judgeUsage.filter(
+    (record): record is TokenUsageRecord => record !== null,
+  );
+  const allKnown = [...knownGeneration, ...knownJudge];
 
   const missingUsageCalls =
-    generationUsage.filter((record) => record === null).length +
-    judgeUsage.filter((record) => record === null).length;
+    generationUsage.length -
+    knownGeneration.length +
+    (judgeUsage.length - knownJudge.length);
 
-  const unknownPricingCalls = allKnown.filter((record) => !record.pricingKnown).length;
+  const unknownGenerationPricingCalls = knownGeneration.filter(
+    (record) => !record.pricingKnown,
+  ).length;
+  const unknownJudgePricingCalls = knownJudge.filter(
+    (record) => !record.pricingKnown,
+  ).length;
+  const unknownPricingCalls = unknownGenerationPricingCalls + unknownJudgePricingCalls;
 
-  const sumCost = allKnown.reduce((total, record) => {
-    return total + (record.estimatedCostUsd ?? 0);
-  }, 0);
+  const sumCost = (records: readonly TokenUsageRecord[]): number =>
+    records.reduce((total, record) => total + (record.estimatedCostUsd ?? 0), 0);
+  const generationCostUsd =
+    unknownGenerationPricingCalls > 0 ? null : sumCost(knownGeneration);
+  const judgeCostUsd = unknownJudgePricingCalls > 0 ? null : sumCost(knownJudge);
 
   return {
     generationCalls: generationUsage.length,
     judgeCalls: judgeUsage.length,
     missingUsageCalls,
     unknownPricingCalls,
+    unknownJudgePricingCalls,
     inputTokens: sumTokens(allKnown, "inputTokens"),
     cachedInputTokens: sumTokens(allKnown, "cachedInputTokens"),
     outputTokens: sumTokens(allKnown, "outputTokens"),
     reasoningTokens: sumTokens(allKnown, "reasoningTokens"),
     totalTokens: sumTokens(allKnown, "totalTokens"),
-    totalEstimatedCostUsd: unknownPricingCalls > 0 ? null : sumCost,
+    judgeTokens: sumTokens(knownJudge, "totalTokens"),
+    totalEstimatedCostUsd:
+      generationCostUsd === null || judgeCostUsd === null
+        ? null
+        : generationCostUsd + judgeCostUsd,
+    generationCostUsd,
+    judgeCostUsd,
   };
 }
 

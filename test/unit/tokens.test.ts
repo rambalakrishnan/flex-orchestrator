@@ -133,12 +133,16 @@ describe("aggregateUsage", () => {
       judgeCalls: 0,
       missingUsageCalls: 0,
       unknownPricingCalls: 0,
+      unknownJudgePricingCalls: 0,
       inputTokens: 0,
       cachedInputTokens: 0,
       outputTokens: 0,
       reasoningTokens: 0,
       totalTokens: 0,
+      judgeTokens: 0,
       totalEstimatedCostUsd: 0,
+      generationCostUsd: 0,
+      judgeCostUsd: 0,
     });
   });
 
@@ -158,6 +162,10 @@ describe("aggregateUsage", () => {
     expect(aggregate.reasoningTokens).toBe(50);
     expect(aggregate.totalTokens).toBe(1200 + 600 + 220);
     expect(aggregate.totalEstimatedCostUsd).toBeCloseTo(0.002 + 0.001 + 0.0005, 10);
+    expect(aggregate.generationCostUsd).toBeCloseTo(0.002 + 0.001, 10);
+    expect(aggregate.judgeCostUsd).toBeCloseTo(0.0005, 10);
+    expect(aggregate.judgeTokens).toBe(220);
+    expect(aggregate.unknownJudgePricingCalls).toBe(0);
   });
 
   it("keeps unknown pricing explicit instead of estimating a total", () => {
@@ -168,8 +176,25 @@ describe("aggregateUsage", () => {
 
     expect(aggregate.unknownPricingCalls).toBe(1);
     expect(aggregate.totalEstimatedCostUsd).toBeNull();
+    expect(aggregate.generationCostUsd).toBeNull();
+    expect(aggregate.judgeCostUsd).toBe(0);
     // Token sums still include the unknown-pricing call (usage was known).
     expect(aggregate.inputTokens).toBe(2000);
+  });
+
+  it("quarantines unknown judge pricing instead of nulling the generation total", () => {
+    const aggregate = aggregateUsage({
+      generationUsage: [usage({ estimatedCostUsd: 0.002 })],
+      judgeUsage: [usage({ estimatedCostUsd: null, pricingKnown: false })],
+    });
+
+    expect(aggregate.unknownPricingCalls).toBe(1);
+    expect(aggregate.unknownJudgePricingCalls).toBe(1);
+    expect(aggregate.generationCostUsd).toBeCloseTo(0.002, 10);
+    expect(aggregate.judgeCostUsd).toBeNull();
+    expect(aggregate.totalEstimatedCostUsd).toBeNull();
+    // Judge usage still counts toward token sums.
+    expect(aggregate.judgeTokens).toBe(1200);
   });
 
   it("does not infer a cache-write premium from TTL", () => {

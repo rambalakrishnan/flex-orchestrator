@@ -109,6 +109,7 @@ export interface PriorAcceptedTurn {
   readonly turnIndex: TurnIndex;
   readonly deliverableText: string;
   readonly attachmentFileIds: readonly FileId[];
+  readonly pinnedInReplay?: boolean;
 }
 
 export interface BuildGenerationInputParams {

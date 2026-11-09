@@ -704,7 +704,7 @@ function healthLines(health) {
   const lines = [{ label: "Main", text: describeHealthProbe(mainProbe) }];
 
   if (judgeProbe === null || judgeProbe === undefined) {
-    lines.push({ label: "Judge", text: "not checked" });
+    lines.push({ label: "Judge", text: "n/a — open a job for the judge probe" });
   } else if (typeof judgeProbe === "object" && judgeProbe.skipped === true) {
     lines.push({ label: "Judge", text: "skipped (judge disabled)" });
   } else {

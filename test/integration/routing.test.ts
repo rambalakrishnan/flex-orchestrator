@@ -128,10 +128,12 @@ describe("server-rendered fragments", () => {
   it("serves static assets on non-API paths", async () => {
     const css = await mainWorker.fetch(`https://${APP_HOST}/app.css`);
     expect(css.status).toBe(200);
+    expect(css.headers.get("cache-control")).toBe("no-store");
     expect((await css.text()).length).toBeGreaterThan(0);
 
     const javascript = await mainWorker.fetch(`https://${APP_HOST}/app.js`);
     expect(javascript.status).toBe(200);
+    expect(javascript.headers.get("cache-control")).toBe("no-store");
     expect((await javascript.text()).length).toBeGreaterThan(0);
   });
 });

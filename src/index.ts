@@ -6,8 +6,9 @@
  * - `env.HOOKS_HOST` serves only `POST /openai` (webhook ingress); every other
  *   path on that host is 404.
  * - Every other reachable host serves the application: `/api/jobs*`, `/api/files*`,
- *   `GET /api/health`, `POST /api/tokens/preview`; all remaining paths fall
- *   through to `ASSETS`.
+ *   `GET /api/health`, `POST /api/tokens/preview`; `/app.js` and `/app.css` are
+ *   served from `ASSETS` with caching disabled so fragment HTML can never run
+ *   against a stale client; all remaining paths fall through to `ASSETS`.
  */
 
 import { RegistryDO } from "./do/registry-do.ts";
@@ -35,6 +36,22 @@ function isTokensPath(pathname: string): boolean {
   return pathname === TOKEN_PREVIEW_PATH;
 }
 
+/**
+ * Serves one static asset with caching disabled. `app.js` and `app.css` must
+ * stay coherent with the server-rendered fragments (`no-store`): a cached
+ * client running against fresh fragment HTML produces dead controls.
+ */
+async function serveUncachedAsset(request: Request, env: Env): Promise<Response> {
+  const response = await env.ASSETS.fetch(request);
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const host = getRequestHostname(request);
@@ -58,6 +75,9 @@ export default {
     }
     if (isTokensPath(pathname)) {
       return handleTokensRequest(request, env);
+    }
+    if (pathname === "/app.js" || pathname === "/app.css") {
+      return serveUncachedAsset(request, env);
     }
 
     return env.ASSETS.fetch(request);

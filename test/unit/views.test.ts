@@ -324,3 +324,86 @@ describe("force accept control", () => {
     expect(runningHtml).not.toContain('data-action="force-accept"');
   });
 });
+
+describe("judge unknown errors", () => {
+  const failingJudge = (overrides: Partial<JudgeCallSummaryRow> = {}) =>
+    judgeRow({
+      status: "unknown",
+      verdict: "UNKNOWN",
+      grade: null,
+      comment: null,
+      diagnostics_json: JSON.stringify({
+        unknown_reason: "provider_error",
+        unknown_message: "No such model: deepseek-v4.1-flash-1017",
+      }),
+      ...overrides,
+    });
+
+  it("renders the unknown reason and message in the judge table", () => {
+    const html = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [failingJudge()],
+    );
+
+    expect(html).toContain("<code class=\"provider-error-code\">provider_error</code>");
+    expect(html).toContain("No such model: deepseek-v4.1-flash-1017");
+  });
+
+  it("renders the error line on deliverable judge cards only when present", () => {
+    const failingHtml = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [failingJudge()],
+    );
+    expect(failingHtml).toContain('class="turn-judge-error"');
+    expect(failingHtml).toContain("No such model: deepseek-v4.1-flash-1017");
+
+    const cleanHtml = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [judgeRow()],
+    );
+    expect(cleanHtml).not.toContain('class="turn-judge-error"');
+  });
+
+  it("escapes hostile error text and ignores malformed diagnostics", () => {
+    const hostileHtml = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [
+        failingJudge({
+          diagnostics_json: JSON.stringify({
+            unknown_reason: "<img src=x>",
+            unknown_message: "<script>alert(1)</script>",
+          }),
+        }),
+      ],
+    );
+    expect(hostileHtml).not.toContain("<img src=x>");
+    expect(hostileHtml).not.toContain("<script>alert(1)</script>");
+    expect(hostileHtml).toContain("&lt;img src=x&gt;");
+
+    const malformedHtml = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [failingJudge({ diagnostics_json: "not json" })],
+    );
+    expect(malformedHtml).not.toContain('class="turn-judge-error"');
+  });
+});

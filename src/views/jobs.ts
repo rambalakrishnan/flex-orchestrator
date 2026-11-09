@@ -191,12 +191,18 @@ function renderTurnJudgeResult(judgeCall: JudgeCallSummaryRow): string {
           `judge-comment-${judgeCall.judge_call_id}`,
           `<p class="turn-judge-comment">${commentBody}</p>`,
         );
+  const unknownError = readJudgeUnknownError(judgeCall.diagnostics_json);
+  const errorLine =
+    unknownError.reason === null && unknownError.message === null
+      ? ""
+      : `<div class="turn-judge-error">${renderJudgeUnknownError(judgeCall.diagnostics_json)}</div>`;
 
   return [
     `<section class="turn-judge" data-judge-call-id="${escapeHtml(judgeCall.judge_call_id)}">`,
     verdict,
     `<span class="turn-judge-grade">Grade: ${renderOptionalText(judgeCall.grade)}</span>`,
     comment,
+    errorLine,
     `</section>`,
   ].join("");
 }
@@ -390,6 +396,45 @@ function renderAttemptProviderError(rawDiagnostics: string): string {
   ].join("");
 }
 
+interface JudgeUnknownError {
+  readonly reason: string | null;
+  readonly message: string | null;
+}
+
+function readJudgeUnknownError(raw: string): JudgeUnknownError {
+  const diagnostics = parseDiagnosticsRecord(raw);
+  if (diagnostics === null) {
+    return { reason: null, message: null };
+  }
+  const rawReason = diagnostics.unknown_reason;
+  const rawMessage = diagnostics.unknown_message;
+  return {
+    reason:
+      typeof rawReason === "string" && rawReason.length > 0 ? rawReason : null,
+    message:
+      typeof rawMessage === "string" && rawMessage.length > 0
+        ? rawMessage
+        : null,
+  };
+}
+
+function renderJudgeUnknownError(rawDiagnostics: string): string {
+  const { reason, message } = readJudgeUnknownError(rawDiagnostics);
+  if (reason === null && message === null) {
+    return `<span class="muted">—</span>`;
+  }
+  return [
+    `<div class="provider-error">`,
+    reason === null
+      ? ""
+      : `<code class="provider-error-code">${escapeHtml(reason)}</code>`,
+    message === null
+      ? ""
+      : `<span class="provider-error-message">${escapeHtml(message)}</span>`,
+    `</div>`,
+  ].join("");
+}
+
 /**
  * Picks the most advanced attempt for each turn. Attempt numbers order full
  * retries; continuation index and the identifier break ties deterministically.
@@ -570,6 +615,7 @@ function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): stri
       judgeCall.comment === null
         ? `<span class="muted">—</span>`
         : `<span class="judge-comment">${escapeHtml(judgeCall.comment)}</span>`,
+      renderJudgeUnknownError(judgeCall.diagnostics_json),
       renderFlag(judgeCall.tag_agreement),
       renderFlag(judgeCall.file_visibility),
       renderTime(judgeCall.created_at),
@@ -588,6 +634,7 @@ function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): stri
       "Verdict",
       "Grade",
       "Comment",
+      "Error",
       "Tag agreement",
       "File visibility",
       "Created",

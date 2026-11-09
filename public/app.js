@@ -630,8 +630,8 @@ async function refreshDetailFragment(jobId, silent) {
       const jsonlRegion = dialogBody.querySelector(".dialog-jsonl");
       const actionError = dialogBody.querySelector(".dialog-action-error");
       dialogBody.innerHTML = fragment;
-      if (healthRegion instanceof HTMLElement) dialogBody.appendChild(healthRegion);
-      if (jsonlRegion instanceof HTMLElement) dialogBody.appendChild(jsonlRegion);
+      if (jsonlRegion instanceof HTMLElement) placeDialogRegion(jsonlRegion);
+      if (healthRegion instanceof HTMLElement) placeDialogRegion(healthRegion);
       if (actionError instanceof HTMLElement) dialogBody.prepend(actionError);
       syncExpandToggles();
       return;
@@ -731,6 +731,29 @@ function healthState(health) {
   return "ok";
 }
 
+/**
+ * Places an action-result region where the operator can see it: directly
+ * after the detail header (above the deliverables), falling back to the end
+ * of the dialog when no header is present.
+ */
+function placeDialogRegion(region) {
+  const header = dialogBody.querySelector(".job-detail-header");
+  if (!(header instanceof HTMLElement)) {
+    dialogBody.appendChild(region);
+    return;
+  }
+  const parent = header.parentNode;
+  if (!(parent instanceof HTMLElement)) {
+    dialogBody.appendChild(region);
+    return;
+  }
+  if (header.nextSibling !== null) {
+    parent.insertBefore(region, header.nextSibling);
+  } else {
+    parent.appendChild(region);
+  }
+}
+
 function ensureDialogHealthRegion() {
   const existing = dialogBody.querySelector(".dialog-health");
   if (existing instanceof HTMLElement) {
@@ -742,7 +765,7 @@ function ensureDialogHealthRegion() {
   region.hidden = false;
   region.setAttribute("role", "status");
   region.setAttribute("aria-live", "polite");
-  dialogBody.appendChild(region);
+  placeDialogRegion(region);
   return region;
 }
 
@@ -773,6 +796,7 @@ async function runDialogHealthCheck(jobId) {
   const region = ensureDialogHealthRegion();
   region.dataset.state = "";
   region.textContent = "Checking provider health\u2026";
+  region.scrollIntoView({ block: "nearest" });
   try {
     const response = await fetch("/api/health?jobId=" + encodeURIComponent(jobId));
     if (!response.ok) {
@@ -847,7 +871,7 @@ function ensureJsonlRegion() {
   region.className = "dialog-jsonl";
   region.setAttribute("role", "status");
   region.setAttribute("aria-live", "polite");
-  dialogBody.appendChild(region);
+  placeDialogRegion(region);
   return region;
 }
 
@@ -891,6 +915,7 @@ async function runJsonlInspect(jobId) {
   const region = ensureJsonlRegion();
   region.dataset.state = "";
   region.textContent = "Loading JSONL\u2026";
+  region.scrollIntoView({ block: "nearest" });
   try {
     const response = await fetch(
       "/api/jobs/" + encodeURIComponent(jobId) + "/export/jsonl",

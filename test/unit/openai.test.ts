@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   countResponsesInputTokens,
+  dispatchChatCompletionsCreate,
   dispatchResponsesCreate,
   listProviderModels,
   retrieveProviderResponse,
@@ -335,5 +336,156 @@ describe("listProviderModels credential redaction", () => {
     expect(error.status).toBe(401);
     expect(error.message).toContain("[redacted]");
     expect(error.message).not.toContain(apiKey);
+  });
+});
+
+describe("dispatchChatCompletionsCreate", () => {
+  const chatBody = {
+    id: "chatcmpl_judge1",
+    object: "chat.completion",
+    created: 1_760_000_000,
+    model: "deepseek/deepseek-v4.1-flash-1017",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: '{"verdict":"YES","grade":"A","comment":"ok","tag_matches_expected_step":true,"file_visibility":true}',
+        },
+        finish_reason: "stop",
+      },
+    ],
+    usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+  };
+
+  it("posts to /chat/completions and settles output inline", async () => {
+    let capturedUrl = "";
+    let capturedAuth: string | null = null;
+    let capturedIdempotency: string | null = null;
+
+    const outcome = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      apiRoot: "https://openrouter.ai/api/v1",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-1",
+      fetchImpl: async (input, init) => {
+        capturedUrl =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const headers = new Headers(init?.headers);
+        capturedAuth = headers.get("authorization");
+        capturedIdempotency = headers.get("idempotency-key");
+        return new Response(JSON.stringify(chatBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    expect(capturedUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(capturedAuth).toBe("Bearer sk-test");
+    expect(capturedIdempotency).toBe("idem-chat-1");
+    expect(outcome.kind).toBe("completed");
+    if (outcome.kind !== "completed") throw new Error("expected completed outcome");
+    expect(outcome.responseId).toBe("chatcmpl_judge1");
+    expect(outcome.outputText).toContain('"verdict":"YES"');
+    expect(outcome.refusalText).toBeNull();
+    expect(outcome.usage?.inputTokens).toBe(100);
+    expect(outcome.usage?.outputTokens).toBe(20);
+  });
+
+  it("extracts refusal text when the message carries one", async () => {
+    const outcome = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-2",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ...chatBody,
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: "", refusal: "I cannot judge this." },
+                finish_reason: "stop",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    expect(outcome.kind).toBe("completed");
+    if (outcome.kind !== "completed") throw new Error("expected completed outcome");
+    expect(outcome.outputText).toBeNull();
+    expect(outcome.refusalText).toBe("I cannot judge this.");
+  });
+
+  it("classifies capacity, terminal, and ambiguous failures like the responses executor", async () => {
+    const capacity = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-3",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ error: { code: "rate_limit_exceeded", message: "slow down" } }),
+          { status: 429, headers: { "content-type": "application/json", "retry-after": "2" } },
+        ),
+    });
+    expect(capacity.kind).toBe("capacity_unavailable");
+    if (capacity.kind !== "capacity_unavailable") throw new Error("expected capacity outcome");
+    expect(capacity.retryAfterMs).toBe(2000);
+
+    const terminal = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-4",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ error: { code: "model_not_found", message: "No such model" } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        ),
+    });
+    expect(terminal.kind).toBe("terminal_error");
+    if (terminal.kind !== "terminal_error") throw new Error("expected terminal outcome");
+    expect(terminal.errorCode).toBe("model_not_found");
+
+    const ambiguous = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-5",
+      fetchImpl: async () => {
+        throw new Error("socket hang up");
+      },
+    });
+    expect(ambiguous.kind).toBe("ambiguous_dispatch");
+
+    const unparseable = await dispatchChatCompletionsCreate({
+      apiKey: "sk-test",
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-6",
+      fetchImpl: async () => new Response("not json", { status: 200 }),
+    });
+    expect(unparseable.kind).toBe("ambiguous_dispatch");
+  });
+
+  it("redacts an echoed key in terminal errors", async () => {
+    const apiKey = "test-key-123456789";
+    const outcome = await dispatchChatCompletionsCreate({
+      apiKey,
+      requestBytes: utf8Encoder.encode("{}"),
+      idempotencyKey: "idem-chat-7",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            error: { code: "invalid_api_key", message: `Incorrect API key provided: ${apiKey}` },
+          }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    expect(outcome.kind).toBe("terminal_error");
+    if (outcome.kind !== "terminal_error") throw new Error("expected terminal outcome");
+    expect(outcome.message).toContain("[redacted]");
+    expect(outcome.message).not.toContain(apiKey);
   });
 });

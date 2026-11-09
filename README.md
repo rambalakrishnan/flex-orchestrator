@@ -132,7 +132,7 @@ Token counting:
 - **Health Check** probes the provider status summary and model list for the main provider; inside a job's detail it also probes the configured judge provider and checks both configured model IDs.
 - After a turn completes, its provider-reported `usage.input_tokens` is frozen into the turn record and shown in job details; branch copies preserve that value. Provider response IDs are shown for each accepted turn and its latest attempt.
 
-Generation uses Flex background Responses and never falls back to standard tier.
+Generation uses Flex background Responses and never falls back to standard tier. Turns chain server-side through `previous_response_id`; when the last accepted turn's frozen input crosses the model's long-context threshold (or 80% of max input for models without one), the next turn re-anchors to a fresh chain replaying only the two most recent turns, recorded as a `history_reanchored_at_turn:N` warning. This bounds worst-case billed input instead of accumulating the full chain.
 
 ### Monitoring, recovery, branching, and exports
 
@@ -152,7 +152,7 @@ The application health endpoint is `GET /api/health` and optionally `GET /api/he
 
 ## Provider Configurations
 
-Judge reference configurations are documentation only; runtime behavior follows the job’s declared judge configuration. The adapter performs no runtime capability detection or silent substitution. Capability inconsistencies produce advisory warnings. Chat Completions has no stateful response-history mechanism. Passthrough with a non-OpenAI API root remains permitted because a proxy can forward to the OpenAI Files API holding the job’s files. An unencodable declared contract produces `UNKNOWN`.
+Judge reference configurations are documentation only; runtime behavior follows the job’s declared judge configuration. The adapter performs no runtime capability detection or silent substitution. Capability inconsistencies produce advisory warnings. Chat Completions executes synchronously through `POST /chat/completions` and has no stateful response-history mechanism. Passthrough with a non-OpenAI API root remains permitted because a proxy can forward to the OpenAI Files API holding the job’s files. An unencodable declared contract produces `UNKNOWN`. The judge configuration is editable while a job is halted (`PUT /api/jobs/:id/judge-config`); running jobs reject edits.
 
 | Provider | Transport | History | File Delivery |
 | :--- | :--- | :--- | :--- |

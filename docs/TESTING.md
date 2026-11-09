@@ -167,7 +167,7 @@ Cover: `src/lib/markdown.ts`, `src/views/jobs.ts`, `src/handlers/jobs.ts`, `src/
 Cover: `src/db/schema.ts`, `test/db/migrations.test.ts`, `test/db/schema.test.ts`.
 
 ### Generation
-**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, `nocache`, places developer messages in `input` (not `instructions`), keeps developer-role content text-only, delivers developer files as user-role `input_file` content deduplicated with turn attachments, and uses exact canonical-request counting. The developer message carries only the job developer prompt verbatim with no generated per-turn instruction, so it stays byte-identical across turns and attempts for prompt-cache reuse; when the job has no developer prompt, the developer message is omitted entirely.
+**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, `nocache`, places developer messages in `input` (not `instructions`), keeps developer-role content text-only, delivers developer files as user-role `input_file` content deduplicated with turn attachments, and uses exact canonical-request counting. The developer message always starts with the constant, turn-free instruction block (`DEVELOPER_INSTRUCTION`) followed by the job developer prompt verbatim, so it stays byte-identical across turns and attempts for prompt-cache reuse while always carrying the marker protocol.
 
 Long-context classification test points, using mocked counts:
 - **271,999** → not long-context
@@ -313,6 +313,9 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 ### Judge
 - [ ] A declared OpenAI stateful passthrough judge accepts a candidate without warning when capabilities align.
 - [ ] A declared Chat Completions stateful judge produces an advisory warning (not a substitution).
+- [ ] A Chat Completions judge evaluates end-to-end: a valid verdict JSON completes the call, grades normalize, and the candidate accepts on PASS.
+- [ ] Judge configuration edits while halted persist and surface in the detail fragment; edits while running return 409 `job_not_halted` and malformed configs return 400 `invalid_judge_config`.
+- [ ] A chain whose frozen input crosses the model's threshold re-anchors: the next request carries no `previous_response_id`, replays at most two turns, clears the anchor, and records `history_reanchored_at_turn:N`.
 - [ ] A judge infrastructure failure accepts with a warning; the original judge result is preserved.
 - [ ] A judge rejection with "Inject Critique on Failure" retries with the critique visible in the retry prompt; disabling it retries without the critique and the budget still bounds retries.
 - [ ] A passing judge with "Steer Next Turn on Pass" appends the PM steering note to the next turn prompt; disabling it leaves the next prompt unchanged.

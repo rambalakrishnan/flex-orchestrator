@@ -10,6 +10,9 @@ import {
 } from "../../src/constants.ts";
 import {
   COMPLETION_MARKER_FORMAT,
+  DEVELOPER_INSTRUCTION,
+  REANCHOR_REPLAY_TURNS,
+  shouldReanchorHistory,
   applyRetryAfter,
   buildCanonicalGenerationRequest,
   buildGenerationIdempotencyKey,
@@ -119,6 +122,7 @@ describe("canonical generation request body (§7)", () => {
     expect(developer.type).toBe("message");
     expect(developer.role).toBe("developer");
     expect(asItems(developer.content, "developer.content")).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
       { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
     ]);
 
@@ -128,17 +132,20 @@ describe("canonical generation request body (§7)", () => {
     expect(request.inputItems).toEqual(asItems(parsedBody.input, "input"));
   });
 
-  it("omits the developer message when the job has no developer prompt", () => {
+  it("keeps the constant instruction when the job has no developer prompt", () => {
     const { body } = requestBodyOf(baseGenerationRequestParams());
     const input = asItems(body.input, "input");
 
-    expect(input).toHaveLength(1);
-    expect(input[0]?.role).toBe("user");
+    expect(input).toHaveLength(2);
+    expect(input[0]?.role).toBe("developer");
+    expect(asItems(asRecord(input[0], "input[0]").content, "developer.content")).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
+    ]);
   });
 
   it("puts the prompt text in the user message with no attachments by default", () => {
     const { body } = requestBodyOf(baseGenerationRequestParams());
-    const user = asRecord(asItems(body.input, "input")[0], "input[0]");
+    const user = asRecord(asItems(body.input, "input")[1], "input[1]");
 
     expect(user.type).toBe("message");
     expect(user.role).toBe("user");
@@ -225,7 +232,7 @@ describe("canonical generation request body (§7)", () => {
 
   it("replaces the prompt text with the continuation directive on continuation attempts", () => {
     const { body } = requestBodyOf(continuationGenerationRequestParams());
-    const user = asRecord(asItems(body.input, "input")[0], "user");
+    const user = asRecord(asItems(body.input, "input")[1], "user");
     const text = firstContentItem(user, "user").text;
 
     expect(typeof text).toBe("string");
@@ -246,7 +253,7 @@ describe("canonical generation request body (§7)", () => {
     const input = asItems(body.input, "input");
     const assistants = assistantMessages(input);
 
-    expect(input[0]?.role).toBe("assistant");
+    expect(input[0]?.role).toBe("developer");
     expect(input[input.length - 1]?.role).toBe("user");
     expect(assistants).toHaveLength(PRIOR_ACCEPTED_TURNS.length);
     expect(assistants.map((item) => firstContentItem(item, "assistant"))).toEqual(
@@ -298,8 +305,11 @@ describe("developer context in the developer message (§6)", () => {
   it("keeps developer files out of the developer message and attaches them to the user message", () => {
     const { content, input } = developerContentOf(developerContextGenerationRequestParams());
 
-    expect(content).toEqual([{ type: "input_text", text: DEVELOPER_PROMPT_TEXT }]);
-    expect(content.map((item) => item.type)).toEqual(["input_text"]);
+    expect(content).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
+      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
+    ]);
+    expect(content.map((item) => item.type)).toEqual(["input_text", "input_text"]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
@@ -311,7 +321,7 @@ describe("developer context in the developer message (§6)", () => {
 
   it("serializes the developer context on initial and continuation attempts alike", () => {
     const initial = developerContentOf(developerContextGenerationRequestParams());
-    expect(initial.content).toHaveLength(1);
+    expect(initial.content).toHaveLength(2);
 
     const continuation = developerContentOf(
       developerContextGenerationRequestParams({
@@ -322,6 +332,10 @@ describe("developer context in the developer message (§6)", () => {
     );
     expect(continuation.content).toEqual(initial.content);
     expect(continuation.content[0]).toEqual({
+      type: "input_text",
+      text: DEVELOPER_INSTRUCTION,
+    });
+    expect(continuation.content[1]).toEqual({
       type: "input_text",
       text: DEVELOPER_PROMPT_TEXT,
     });
@@ -341,16 +355,15 @@ describe("developer context in the developer message (§6)", () => {
     ]);
   });
 
-  it("omits the developer message for empty or whitespace-only developer context", () => {
+  it("keeps only the constant instruction for empty or whitespace-only developer context", () => {
     for (const params of [
       baseGenerationRequestParams(),
       baseGenerationRequestParams({ developerFileIds: [] }),
       baseGenerationRequestParams({ developerPrompt: "   \n\t " }),
       baseGenerationRequestParams({ developerPrompt: "   ", developerFileIds: [""] }),
     ]) {
-      const { body } = requestBodyOf(params);
-      const input = asItems(body.input, "input");
-      expect(input.every((item) => item.role !== "developer")).toBe(true);
+      const { content } = developerContentOf(params);
+      expect(content).toEqual([{ type: "input_text", text: DEVELOPER_INSTRUCTION }]);
     }
   });
 
@@ -400,7 +413,10 @@ describe("developer context in the developer message (§6)", () => {
       }),
     );
 
-    expect(content).toEqual([{ type: "input_text", text: DEVELOPER_PROMPT_TEXT }]);
+    expect(content).toEqual([
+      { type: "input_text", text: DEVELOPER_INSTRUCTION },
+      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
+    ]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
@@ -495,7 +511,7 @@ describe("1-based turn index enforcement (§7)", () => {
       previousResponseId: null,
     });
 
-    expect(items[0]?.role).toBe("user");
+    expect(items[0]?.role).toBe("developer");
     expect(items[items.length - 1]?.role).toBe("user");
 
     const request = buildCanonicalGenerationRequest(
@@ -503,7 +519,7 @@ describe("1-based turn index enforcement (§7)", () => {
     );
     expect(request.idempotencyKey).toBe(`${BASE_JOB_ID}:t1:a1:c0`);
     const body = parseBody(request.requestBody);
-    expect(asItems(body.input, "input")).toHaveLength(1);
+    expect(asItems(body.input, "input")).toHaveLength(2);
   });
 
   it("accepts every integer turn index above one", () => {
@@ -773,5 +789,33 @@ describe("dispatch classification (§10)", () => {
       errorCode: "invalid_request_error",
       message: "Invalid request body",
     });
+  });
+});
+
+describe("bounded-history re-anchoring", () => {
+  it("holds the chain below the model's long-context threshold", () => {
+    expect(shouldReanchorHistory("gpt-6-astra", 229_002)).toBe(false);
+    expect(shouldReanchorHistory("gpt-6-astra", 272_000)).toBe(false);
+  });
+
+  it("breaks the chain once frozen input crosses the threshold", () => {
+    expect(shouldReanchorHistory("gpt-6-astra", 272_001)).toBe(true);
+    expect(shouldReanchorHistory("gpt-6-astra", 345_917)).toBe(true);
+  });
+
+  it("falls back to a fraction of max input for models without a tier", () => {
+    // o3: 200k max input, no long-context tier → 160k threshold.
+    expect(shouldReanchorHistory("o3", 160_000)).toBe(false);
+    expect(shouldReanchorHistory("o3", 160_001)).toBe(true);
+  });
+
+  it("never re-anchors on missing counts or unknown models", () => {
+    expect(shouldReanchorHistory("gpt-6-astra", null)).toBe(false);
+    expect(shouldReanchorHistory("gpt-6-astra", -1)).toBe(false);
+    expect(shouldReanchorHistory("not-a-model", 999_999_999)).toBe(false);
+  });
+
+  it("pins the replay window at two recent turns", () => {
+    expect(REANCHOR_REPLAY_TURNS).toBe(2);
   });
 });

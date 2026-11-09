@@ -430,6 +430,192 @@ describe("JobDO generation lifecycle", () => {
     expect(new TextDecoder().decode(deliverable!.bytes)).toBe("hello");
   });
 
+  it("evaluates through a chat_completions judge and accepts on PASS", async () => {
+    const jobId = nextJobId();
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const method = init?.method ?? "GET";
+        calls.push({ method, url });
+        if (method === "POST" && url.endsWith("/responses")) {
+          return new Response(completedResponseBody("hello <!-- TURN_END:1 -->"), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (method === "GET" && url.includes("/responses/resp_1")) {
+          return new Response(completedResponseBody("hello <!-- TURN_END:1 -->"), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (method === "POST" && url.endsWith("/chat/completions")) {
+          return new Response(
+            JSON.stringify({
+              id: "chatcmpl_judge1",
+              object: "chat.completion",
+              created: 1_760_000_000,
+              model: "deepseek/deepseek-v4.1-flash-1017",
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: "assistant",
+                    content:
+                      '{"verdict":"YES","grade":"A","comment":"Clean greeting.","tag_matches_expected_step":true,"file_visibility":true}',
+                  },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: { prompt_tokens: 50, completion_tokens: 10, total_tokens: 60 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected provider call: ${method} ${url}`);
+      }),
+    );
+    const stub = stubFor(jobId);
+
+    await stub.createJob({
+      jobId,
+      title: "chat judge job",
+      config: {
+        ...JOB_CONFIG,
+        judge: {
+          ...ENABLED_JUDGE_CONFIG,
+          provider: "openrouter",
+          apiRoot: "https://openrouter.ai/api/v1",
+          model: "deepseek/deepseek-v4.1-flash-1017",
+          transport: "chat_completions",
+          fileDeliveryMode: "inline",
+        },
+      },
+      initialTurns: [],
+    });
+    await stub.appendTurn({ promptText: "Write a greeting.", attachmentFileIds: [] });
+    await stub.receiveWebhookDelivery({
+      webhookId: "wh_chat_judge",
+      timestampSeconds: 1_760_000_000,
+      eventType: "response.completed",
+      responseId: "resp_1",
+      rawPayload: new ArrayBuffer(0),
+      receivedAtMs: 1_760_000_000_000,
+    });
+
+    expect(calls.some((call) => call.url.endsWith("/chat/completions"))).toBe(true);
+    const judgeCalls = await stub.listJudgeCalls({ limit: 10 });
+    expect(judgeCalls.items).toHaveLength(1);
+    expect(judgeCalls.items[0]!.status).toBe("completed");
+    expect(judgeCalls.items[0]!.verdict).toBe("PASS");
+    expect(judgeCalls.items[0]!.grade).toBe(95);
+
+    const settled = await stub.getState();
+    if (settled === null) throw new Error("expected settled state");
+    expect(settled.job.status).toBe("completed");
+    expect(settled.turns[0]!.status).toBe("accepted");
+  });
+
+  it("breaks the chain with a bounded replay window once frozen input crosses the tier", async () => {
+    const jobId = nextJobId();
+    const calls: FetchCall[] = [];
+    const bodiesByResponse: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const method = init?.method ?? "GET";
+        calls.push({ method, url });
+        if (method === "POST" && url.endsWith("/responses")) {
+          const turnIndex = Object.keys(bodiesByResponse).length + 1;
+          const responseId = `resp_chain_${turnIndex}`;
+          bodiesByResponse[responseId] = `turn ${turnIndex} <!-- TURN_END:${turnIndex} -->`;
+          return new Response(
+            JSON.stringify({ id: responseId, model: "gpt-5", status: "queued" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const match = /\/responses\/(resp_chain_\d+)$/.exec(url);
+        if (method === "GET" && match !== null) {
+          const responseId = match[1]!;
+          const turnIndex = Number(responseId.split("_").pop());
+          return new Response(
+            JSON.stringify({
+              id: responseId,
+              model: "gpt-5",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: bodiesByResponse[responseId] }],
+                },
+              ],
+              usage: {
+                input_tokens: turnIndex >= 3 ? 300_000 : 12,
+                output_tokens: 8,
+                total_tokens: turnIndex >= 3 ? 300_008 : 20,
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected provider call: ${method} ${url}`);
+      }),
+    );
+    const stub = stubFor(jobId);
+
+    await stub.createJob({
+      jobId,
+      title: "re-anchor job",
+      config: JOB_CONFIG,
+      initialTurns: [],
+    });
+    for (let turn = 1; turn <= 3; turn += 1) {
+      await stub.appendTurn({ promptText: `Turn ${turn}.`, attachmentFileIds: [] });
+      await stub.receiveWebhookDelivery({
+        webhookId: `wh_chain_${turn}`,
+        timestampSeconds: 1_760_000_000,
+        eventType: "response.completed",
+        responseId: `resp_chain_${turn}`,
+        rawPayload: new ArrayBuffer(0),
+        receivedAtMs: 1_760_000_000_000,
+      });
+    }
+    const chained = await stub.getState();
+    if (chained === null) throw new Error("expected job state");
+    expect(chained.job.acceptedTurnCount).toBe(3);
+    expect(chained.job.lastAcceptedResponseId).toBe("resp_chain_3");
+
+    const appended = await stub.appendTurn({
+      promptText: "Turn 4.",
+      attachmentFileIds: [],
+    });
+    expect(appended.job.status).toBe("running");
+    const requestArtifact = await stub.readArtifact({
+      kind: "attempt_request",
+      id: appended.activeAttempt!.attemptId,
+    });
+    expect(requestArtifact).not.toBeNull();
+    const request = JSON.parse(new TextDecoder().decode(requestArtifact!.bytes)) as {
+      previous_response_id?: string;
+      input: Array<{ role?: string }>;
+    };
+    // Fresh chain: no anchor, exactly the two most recent turns replayed.
+    expect("previous_response_id" in request).toBe(false);
+    const assistantReplays = request.input.filter((item) => item.role === "assistant");
+    expect(assistantReplays).toHaveLength(2);
+
+    const reanchored = await stub.getState();
+    if (reanchored === null) throw new Error("expected job state");
+    expect(reanchored.job.lastAcceptedResponseId).toBeNull();
+    expect(reanchored.job.warningMessages).toContain("history_reanchored_at_turn:4");
+  });
+
   it("captures a quiescent branch snapshot and initializes the child in one transaction", async () => {
     const parentJobId = nextJobId();
     stubProviderFetch([]);

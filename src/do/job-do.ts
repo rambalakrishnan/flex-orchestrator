@@ -29,6 +29,7 @@ import {
   markFileIntroducedInJudgeCall,
   requireJob,
   updateJobStatusAndRevision,
+  updateJudgeConfigJson,
   upsertJobFiles,
 } from "../db/jobs.ts";
 import {
@@ -82,7 +83,9 @@ import {
 } from "../db/schema.ts";
 import { now } from "../lib/clock.ts";
 import {
+  REANCHOR_REPLAY_TURNS,
   buildCanonicalGenerationRequest,
+  shouldReanchorHistory,
   classifyDispatchResult,
   type GenerationAttemptKind,
   type PriorAcceptedTurn,
@@ -101,6 +104,7 @@ import {
 } from "../lib/judge.ts";
 import {
   cancelProviderResponse,
+  dispatchChatCompletionsCreate,
   dispatchResponsesCreate,
   resolveEnvSecret,
   retrieveProviderResponse,
@@ -1308,6 +1312,33 @@ export class JobDO extends DurableObject<Env> {
   }
 
   /**
+   * Replaces the job's judge configuration. Allowed only while the job is
+   * halted: a running job may already have built (or dispatched) judge
+   * requests from the old config, so edits apply to future evaluations.
+   */
+  async updateJudgeConfig(config: unknown): Promise<JobStateResponse> {
+    const job = requireJob(this.sql);
+    if (
+      job.status !== "failed" &&
+      job.status !== "ready" &&
+      !PAUSED_JOB_STATUSES.has(job.status)
+    ) {
+      throw new Error(
+        `updateJudgeConfig requires a halted or ready job; current status is ${job.status}`
+      );
+    }
+    const encoded = JSON.stringify(config ?? null);
+    // Validate before writing: parseJudgeConfig throws on any contract gap.
+    parseJudgeConfig(encoded);
+    this.storage.transactionSync(() => {
+      updateJudgeConfigJson(this.sql, job.job_id, encoded, toIso(now()));
+    });
+    const row = requireJob(this.sql, job.job_id);
+    await this.publishAndSchedule(row);
+    return this.requireState();
+  }
+
+  /**
    * Re-registers every file reference the recovered turn may re-send after a
    * failed job released its references and opened the retention window.
    */
@@ -2469,6 +2500,14 @@ export class JobDO extends DurableObject<Env> {
     return prior;
   }
 
+  private loadRecentAcceptedTurns(turnIndex: TurnIndex, count: number): PriorAcceptedTurn[] {
+    const prior = this.loadPriorAcceptedTurns(turnIndex);
+    if (prior.length <= count) {
+      return prior;
+    }
+    return prior.slice(prior.length - count);
+  }
+
   private prepareGenerationAttempt(
     jobId: JobId,
     turnIndex: TurnIndex,
@@ -2489,14 +2528,30 @@ export class JobDO extends DurableObject<Env> {
     const attemptNumber = this.nextAttemptNumber(turnIndex);
     const promptText = getTurnPromptText(this.sql, turnIndex) ?? "";
     const attachmentFileIds = readStringArray(turn.attachment_file_ids_json);
-    const priorAcceptedTurns = this.loadPriorAcceptedTurns(turnIndex);
+    const jobConfig = jobConfigFromRow(job);
+    // Break the server-side chain when the last accepted turn's frozen input
+    // shows the chain has crossed the model's cost/ceiling threshold. The new
+    // chain carries only a bounded replay window instead of full history.
+    const reanchoring =
+      kind === "initial" &&
+      job.last_accepted_response_id !== null &&
+      shouldReanchorHistory(
+        jobConfig.model,
+        job.accepted_turn_index > 0
+          ? (getTurnSummary(this.sql, job.accepted_turn_index)?.marginal_input_tokens ?? null)
+          : null,
+      );
+    const priorAcceptedTurns = reanchoring
+      ? this.loadRecentAcceptedTurns(turnIndex, REANCHOR_REPLAY_TURNS)
+      : this.loadPriorAcceptedTurns(turnIndex);
     const anchor =
       kind === "continuation"
         ? parentResponseId
         : kind === "initial"
-          ? job.last_accepted_response_id
+          ? reanchoring
+            ? null
+            : job.last_accepted_response_id
           : null;
-    const jobConfig = jobConfigFromRow(job);
     const canonical = buildCanonicalGenerationRequest({
       jobId: job.job_id,
       model: jobConfig.model,
@@ -2551,6 +2606,17 @@ export class JobDO extends DurableObject<Env> {
         status: "running",
         activeAttemptId: inserted.attempt_id,
         currentTurnIndex: turnIndex,
+        ...(reanchoring
+          ? {
+              lastAcceptedResponseId: null,
+              warningsJson: JSON.stringify(
+                uniqueStrings([
+                  ...readStringArray(currentJob.warnings_json),
+                  `history_reanchored_at_turn:${turnIndex}`,
+                ]),
+              ),
+            }
+          : {}),
         updatedAt: nowIso,
       });
       upsertDurableWork(this.sql, {
@@ -3678,13 +3744,49 @@ export class JobDO extends DurableObject<Env> {
     let outcome: JudgeEvaluationOutcome;
     let observedJudgeResponseId: string | null = null;
     if (config.transport === "chat_completions") {
-      outcome = {
-        kind: "unknown",
-        judgeCallId,
-        reason: "provider_error",
-        message: "Chat Completions judge transport has no ProviderIO executor",
-        advisoryWarnings: built.request.advisoryWarnings,
-      };
+      const pausedCheck = getJob(this.sql);
+      if (pausedCheck !== null && PAUSED_JOB_STATUSES.has(pausedCheck.status)) {
+        return;
+      }
+      try {
+        const completed = await dispatchChatCompletionsCreate({
+          apiKey,
+          apiRoot: config.apiRoot,
+          requestBytes: built.request.requestBytes,
+          idempotencyKey: built.request.idempotencyKey,
+        });
+        if (completed.kind !== "completed") {
+          outcome = {
+            kind: "unknown",
+            judgeCallId,
+            reason: "provider_error",
+            message:
+              completed.kind === "terminal_error"
+                ? completed.message
+                : "Judge dispatch failed",
+            advisoryWarnings: built.request.advisoryWarnings,
+          };
+        } else {
+          observedJudgeResponseId = completed.responseId;
+          const parse = parseJudgeOutput(completed.outputText ?? "");
+          outcome = classifyJudgeEvaluation({
+            judgeCallId,
+            parse,
+            manifest: built.request.manifest,
+            responseId: completed.responseId,
+            usage: completed.usage,
+            providerErrorMessage: null,
+          });
+        }
+      } catch (error) {
+        outcome = {
+          kind: "unknown",
+          judgeCallId,
+          reason: "provider_error",
+          message: describeError(error),
+          advisoryWarnings: built.request.advisoryWarnings,
+        };
+      }
     } else {
       const pausedCheck = getJob(this.sql);
       if (pausedCheck !== null && PAUSED_JOB_STATUSES.has(pausedCheck.status)) {
@@ -4733,7 +4835,54 @@ export class JobDO extends DurableObject<Env> {
     }
 
     let outcome: JudgeEvaluationOutcome;
-    if (call.provider_response_id === null) {
+    if (call.transport === "chat_completions" && call.provider_response_id === null) {
+      // Chat Completions is synchronous: a pending call with no response id
+      // means the dispatch crashed mid-flight. Re-dispatch once with the
+      // stored bytes and the original idempotency key.
+      try {
+        const apiKey = resolveEnvSecret(this.env, config.enabled ? config.secretName : "");
+        const requestBytes = getJudgeCallRequestBlob(this.sql, judgeCallId);
+        if (requestBytes === null) {
+          throw new Error("Judge request artifact is missing");
+        }
+        const completed = await dispatchChatCompletionsCreate({
+          apiKey,
+          apiRoot: config.enabled ? config.apiRoot : undefined,
+          requestBytes,
+          idempotencyKey: `${job.job_id}:j${call.turn_index}:${judgeCallId}`,
+        });
+        if (completed.kind !== "completed") {
+          outcome = {
+            kind: "unknown",
+            judgeCallId,
+            reason: "provider_error",
+            message:
+              completed.kind === "terminal_error"
+                ? completed.message
+                : "Judge dispatch failed",
+            advisoryWarnings: diagnostics.advisory_warnings,
+          };
+        } else {
+          const parse = parseJudgeOutput(completed.outputText ?? "");
+          outcome = classifyJudgeEvaluation({
+            judgeCallId,
+            parse,
+            manifest: parseManifest(call.manifest_json),
+            responseId: completed.responseId,
+            usage: completed.usage,
+            providerErrorMessage: null,
+          });
+        }
+      } catch (error) {
+        outcome = {
+          kind: "unknown",
+          judgeCallId,
+          reason: "provider_error",
+          message: describeError(error),
+          advisoryWarnings: diagnostics.advisory_warnings,
+        };
+      }
+    } else if (call.provider_response_id === null) {
       outcome = {
         kind: "unknown",
         judgeCallId,

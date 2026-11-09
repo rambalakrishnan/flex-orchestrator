@@ -1079,6 +1079,66 @@ jobList.addEventListener("click", (event) => {
   const jobId = card === null ? null : card.getAttribute("data-job-id");
   if (jobId) openJobDetail(jobId);
 });
+
+dialogBody.addEventListener("submit", (event) => {
+  const formElement = event.target instanceof Element ? event.target.closest(".judge-config-edit") : null;
+  if (!(formElement instanceof HTMLFormElement)) return;
+  event.preventDefault();
+  void saveJudgeConfig(formElement);
+});
+
+async function saveJudgeConfig(formElement) {
+  const jobId = formElement.getAttribute("data-job-id") ?? detailJobId;
+  const status = formElement.querySelector(".judge-config-edit-status");
+  const fields = new FormData(formElement);
+  const read = (name) => {
+    const raw = fields.get(name);
+    return typeof raw === "string" ? raw : "";
+  };
+  const setStatusMessage = (message) => {
+    if (status instanceof HTMLElement) status.textContent = message;
+  };
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    setStatusMessage("Error: Job identifier is missing.");
+    return;
+  }
+  const maxGradeThreshold = Number(read("maxGradeThreshold"));
+  if (!Number.isFinite(maxGradeThreshold)) {
+    setStatusMessage("Error: Minimum grade must be a number.");
+    return;
+  }
+  setStatusMessage("Saving judge config\u2026");
+  try {
+    const response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/judge-config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+        provider: read("provider"),
+        apiRoot: read("apiRoot"),
+        secretName: read("secretName"),
+        model: read("model").trim(),
+        transport: read("transport"),
+        historyMode: read("historyMode"),
+        fileDeliveryMode: read("fileDeliveryMode"),
+        includePrior: read("includePrior") === "true",
+        maxGradeThreshold,
+        injectOnFail: read("injectOnFail") === "true",
+        injectOnPass: read("injectOnPass") === "true",
+        developerPrompt: read("developerPrompt"),
+      }),
+    });
+    if (!response.ok) {
+      setStatusMessage("Error: " + (await errorMessage(response)));
+      return;
+    }
+    setStatusMessage("Judge config saved. Future turns will use it.");
+    await refreshDetailFragment(jobId, false);
+    await refreshJobs();
+  } catch (error) {
+    setStatusMessage("Error: " + describeError(error));
+  }
+}
 dialogBody.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
   const toggle = event.target.closest(".expand-toggle");

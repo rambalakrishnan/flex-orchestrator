@@ -324,6 +324,42 @@ export function bumpJobRevision(
 }
 
 /**
+ * Replaces `judge_config_json` on `jobs` (already validated by the caller),
+ * bumps the revision, and returns the updated row.
+ */
+export function updateJudgeConfigJson(
+  sql: SchemaSqlStorage,
+  jobId: string,
+  judgeConfigJson: string,
+  updatedAt: string
+): JobRow {
+  return withSqlErrorMapping(() => {
+    const current = requireJob(sql, jobId);
+    assertJobRowSize(
+      {
+        job_id: current.job_id,
+        title: current.title,
+        model: current.model,
+        judge_config_json: judgeConfigJson,
+        developer_prompt: current.developer_prompt,
+        developer_file_ids_json: current.developer_file_ids_json,
+        warnings_json: current.warnings_json,
+        usage_summary_json: current.usage_summary_json,
+        last_error_detail: current.last_error_detail,
+      },
+      "jobs.update"
+    );
+    sql.exec(
+      "UPDATE jobs SET judge_config_json = ?, revision = revision + 1, updated_at = ? WHERE job_id = ?",
+      judgeConfigJson,
+      updatedAt,
+      jobId
+    );
+    return requireJob(sql, jobId);
+  });
+}
+
+/**
  * Validates `assertBranchSnapshotSize(row.snapshot_bytes)` and inserts into `branch_lineage`.
  */
 export function insertBranchLineage(

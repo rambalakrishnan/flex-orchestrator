@@ -928,3 +928,218 @@ export async function listProviderModels(
 
   return { modelIds };
 }
+
+export interface DispatchChatCompletionsCreateParams {
+  readonly apiKey: string;
+  readonly apiRoot?: string;
+  readonly requestBytes: Uint8Array | ArrayBuffer;
+  readonly idempotencyKey: IdempotencyKey;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly fetchImpl?: typeof fetch;
+}
+
+export type ChatCompletionsOutcome =
+  | {
+      readonly kind: "completed";
+      readonly responseId: ResponseId | null;
+      readonly outputText: string | null;
+      readonly refusalText: string | null;
+      readonly usage: TokenUsageRecord | null;
+      readonly rawResponseBytes: ArrayBuffer;
+    }
+  | {
+      readonly kind: "capacity_unavailable";
+      readonly statusCode: number;
+      readonly retryAfterMs: number | null;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "ambiguous_dispatch";
+      readonly reason: "network_error" | "timeout" | "unparseable_response" | "server_5xx";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "terminal_error";
+      readonly statusCode: number;
+      readonly errorCode: string | null;
+      readonly message: string;
+    };
+
+function extractChatOutputAndRefusal(payload: Record<string, unknown>): {
+  readonly outputText: string | null;
+  readonly refusalText: string | null;
+} {
+  if (!Array.isArray(payload.choices) || payload.choices.length === 0) {
+    return { outputText: null, refusalText: null };
+  }
+  const first = payload.choices[0];
+  if (!isPlainRecord(first) || !isPlainRecord(first.message)) {
+    return { outputText: null, refusalText: null };
+  }
+  const message = first.message;
+  const content = message.content;
+  let outputText: string | null = null;
+  if (typeof content === "string" && content.length > 0) {
+    outputText = content;
+  } else if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const part of content) {
+      if (isPlainRecord(part) && typeof part.text === "string" && part.text.length > 0) {
+        parts.push(part.text);
+      }
+    }
+    outputText = parts.length > 0 ? parts.join("") : null;
+  }
+  const refusalText =
+    typeof message.refusal === "string" && message.refusal.length > 0
+      ? message.refusal
+      : null;
+  return { outputText, refusalText };
+}
+
+/**
+ * Performs a one-shot `POST /chat/completions` call with the exact stored
+ * UTF-8 request bytes and `Idempotency-Key`. Chat Completions is synchronous,
+ * so a 2xx response carries the settled output inline (no response id is
+ * required and none is polled later). Error taxonomy mirrors
+ * `dispatchResponsesCreate`; never retries internally.
+ */
+export async function dispatchChatCompletionsCreate(
+  params: DispatchChatCompletionsCreateParams,
+): Promise<ChatCompletionsOutcome> {
+  const apiRoot = normalizeApiRoot(params.apiRoot);
+  const url = `${apiRoot}/chat/completions`;
+  const bodyBuffer = toExactArrayBuffer(params.requestBytes);
+
+  let response: Response;
+  try {
+    response = await performRequest(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${params.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "Idempotency-Key": params.idempotencyKey,
+        },
+        body: bodyBuffer,
+      },
+      params,
+    );
+  } catch (err: unknown) {
+    const reason = classifyCatchReason(err);
+    const message = redactSensitiveText(
+      err instanceof Error ? err.message : String(err),
+      [params.apiKey],
+    );
+    return {
+      kind: "ambiguous_dispatch",
+      reason,
+      message,
+    };
+  }
+
+  let rawBytes: Uint8Array;
+  try {
+    rawBytes = await readBoundedBytes(response, ARTIFACT_ROW_GUARD_BYTES, params.signal);
+  } catch (err: unknown) {
+    if (err instanceof HttpError && err.status === 413) {
+      return {
+        kind: "terminal_error",
+        statusCode: 413,
+        errorCode: err.code,
+        message: redactSensitiveText(err.message, [params.apiKey]),
+      };
+    }
+    return {
+      kind: "ambiguous_dispatch",
+      reason: classifyCatchReason(err),
+      message: redactSensitiveText(
+        err instanceof Error ? err.message : String(err),
+        [params.apiKey],
+      ),
+    };
+  }
+
+  const rawText = utf8Decoder.decode(rawBytes);
+  let parsed: unknown = null;
+  let jsonValid = false;
+  if (rawText.trim().length > 0) {
+    try {
+      parsed = JSON.parse(rawText);
+      jsonValid = true;
+    } catch {
+      jsonValid = false;
+    }
+  }
+
+  if (response.status === 429) {
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
+    return {
+      kind: "capacity_unavailable",
+      statusCode: 429,
+      retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")),
+      message: errInfo.message,
+    };
+  }
+
+  if (response.status === 503) {
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
+    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+    if (retryAfterMs !== null || isCapacityErrorCode(errInfo.code, errInfo.type, errInfo.message)) {
+      return {
+        kind: "capacity_unavailable",
+        statusCode: 503,
+        retryAfterMs,
+        message: errInfo.message,
+      };
+    }
+    return {
+      kind: "ambiguous_dispatch",
+      reason: "server_5xx",
+      message: errInfo.message,
+    };
+  }
+
+  if (response.status >= 500) {
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
+    return {
+      kind: "ambiguous_dispatch",
+      reason: "server_5xx",
+      message: errInfo.message,
+    };
+  }
+
+  if (response.status >= 400) {
+    const errInfo = extractProviderError(parsed, response.status, [params.apiKey]);
+    return {
+      kind: "terminal_error",
+      statusCode: response.status,
+      errorCode: errInfo.code,
+      message: errInfo.message,
+    };
+  }
+
+  if (!jsonValid || !isPlainRecord(parsed)) {
+    return {
+      kind: "ambiguous_dispatch",
+      reason: "unparseable_response",
+      message: "Provider returned 2xx without a valid Chat Completions object",
+    };
+  }
+
+  const { outputText, refusalText } = extractChatOutputAndRefusal(parsed);
+  const usage = extractTokenUsage(parsed);
+  const responseId =
+    typeof parsed.id === "string" && parsed.id.length > 0 ? parsed.id : null;
+  return {
+    kind: "completed",
+    responseId,
+    outputText,
+    refusalText,
+    usage,
+    rawResponseBytes: toExactArrayBuffer(rawBytes),
+  };
+}

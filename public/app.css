@@ -1343,6 +1343,52 @@ em[class*="status-"] {
   color: var(--warning);
 }
 
+.judge-config {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.55rem;
+  margin: 0 0 0.8rem;
+}
+
+.judge-config > div {
+  padding: 0.55rem 0.7rem;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.judge-config dt {
+  margin: 0 0 0.1rem;
+  color: var(--faint);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.judge-config dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.judge-config-edit p {
+  margin: 0.5rem 0;
+}
+
+.judge-config-edit-note {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.judge-config-edit input,
+.judge-config-edit select {
+  width: 100%;
+  max-width: 28rem;
+}
+
 .job-card-timestamps {
   display: flex;
   flex-wrap: wrap;

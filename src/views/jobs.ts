@@ -547,6 +547,71 @@ function renderJudgeCallsTable(judgeCalls: readonly JudgeCallSummaryRow[]): stri
   );
 }
 
+function renderJudgeConfigSection(job: JobStateResponse): string {
+  const config = job.job.config.judge;
+  const rows: string[] = [];
+  if (!config.enabled) {
+    rows.push(`<p class="empty-state">Judging is disabled for this job.</p>`);
+  } else {
+    const fields: ReadonlyArray<readonly [string, string]> = [
+      ["Model", config.model],
+      ["Transport", config.transport],
+      ["API root", config.apiRoot],
+      ["Secret binding", config.secretName],
+      ["History mode", config.historyMode],
+      ["File delivery", config.fileDeliveryMode],
+      ["Minimum grade", String(config.maxGradeThreshold)],
+      ["Inject on fail", config.injectOnFail ? "yes" : "no"],
+      ["Inject on pass", config.injectOnPass ? "yes" : "no"],
+    ];
+    rows.push(
+      `<dl class="judge-config">`,
+      ...fields.map(
+        ([label, value]) =>
+          `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`,
+      ),
+      `</dl>`,
+    );
+  }
+  const halted =
+    job.job.status === "failed" ||
+    job.job.status === "ready" ||
+    job.job.status === "paused_review" ||
+    job.job.status === "paused_dispatch" ||
+    job.job.status === "paused_storage" ||
+    job.job.status === "paused_operator";
+  if (halted && config.enabled) {
+    rows.push(
+      `<form class="judge-config-edit" data-job-id="${escapeHtml(job.job.jobId)}">`,
+      `<p class="judge-config-edit-note">Edits apply to future evaluations. Fix the model id, transport, or endpoint, then save.</p>`,
+      `<p><label>Model <input name="model" value="${escapeHtml(config.model)}" required /></label></p>`,
+      `<p><label>API root <input name="apiRoot" value="${escapeHtml(config.apiRoot)}" required /></label></p>`,
+      `<p><label>Secret binding <input name="secretName" value="${escapeHtml(config.secretName)}" required /></label></p>`,
+      `<p><label>Transport <select name="transport">`,
+      `<option value="responses"${config.transport === "responses" ? " selected" : ""}>responses</option>`,
+      `<option value="chat_completions"${config.transport === "chat_completions" ? " selected" : ""}>chat_completions</option>`,
+      `</select></label></p>`,
+      `<input type="hidden" name="provider" value="${escapeHtml(config.provider)}" />`,
+      `<input type="hidden" name="historyMode" value="${escapeHtml(config.historyMode)}" />`,
+      `<input type="hidden" name="fileDeliveryMode" value="${escapeHtml(config.fileDeliveryMode)}" />`,
+      `<input type="hidden" name="includePrior" value="${config.includePrior ? "true" : "false"}" />`,
+      `<input type="hidden" name="maxGradeThreshold" value="${escapeHtml(String(config.maxGradeThreshold))}" />`,
+      `<input type="hidden" name="injectOnFail" value="${config.injectOnFail ? "true" : "false"}" />`,
+      `<input type="hidden" name="injectOnPass" value="${config.injectOnPass ? "true" : "false"}" />`,
+      `<input type="hidden" name="developerPrompt" value="${escapeHtml(config.developerPrompt)}" />`,
+      `<p><button type="submit">Save judge config</button></p>`,
+      `<p class="judge-config-edit-status" role="status"></p>`,
+      `</form>`,
+    );
+  }
+  return [
+    `<section class="detail-section">`,
+    `<h3 class="detail-section-title">Judge configuration</h3>`,
+    ...rows,
+    `</section>`,
+  ].join("");
+}
+
 /**
  * Renders a job detail fragment. `deliverables` carries accepted turn text
  * because `JobStateResponse.turns` only exposes turn metadata. Deliverables
@@ -688,6 +753,7 @@ export function renderJobDetail(
     `<h3 class="detail-section-title">Judge calls</h3>`,
     renderJudgeCallsTable(judgeCalls),
     `</section>`,
+    renderJudgeConfigSection(job),
     `</article>`,
   ].join("");
 }

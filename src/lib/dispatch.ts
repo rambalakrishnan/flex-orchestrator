@@ -23,6 +23,7 @@ import {
   FLEX_CAPACITY_BACKOFF_MAX_MS,
   GENERATION_SERVICE_TIER,
   MAX_FLEX_CAPACITY_SENDS_PER_ATTEMPT,
+  getVerifiedGenerationModel,
 } from "../constants.ts";
 import type {
   CacheTtl,
@@ -40,6 +41,57 @@ import { assertTurnIndex } from "./guards.ts";
 
 /** Canonical terminal completion marker for a given turn index. */
 export const COMPLETION_MARKER_FORMAT = "<!-- TURN_END:{turnIndex} -->";
+
+/**
+ * Constant developer instruction prepended to every generation request.
+ * Deliberately turn-free (no turn number, no item-specific marker text) so
+ * the developer message stays byte-identical across turns and attempts for
+ * prompt-cache reuse. It guarantees the marker protocol is always present
+ * even when the job developer prompt omits it; `n` is resolved from the
+ * manifest item number named in the user message for that turn.
+ */
+export const DEVELOPER_INSTRUCTION =
+  "You are producing one turn of a sequential writing job. Return only the deliverable text for this turn. " +
+  "When the turn is complete, end your output with <!-- TURN_END:n -->, where n is the manifest item number named in the user message. " +
+  "Emit no other marker.";
+
+/** Accepted turns replayed inline when a new chain starts after a re-anchor. */
+export const REANCHOR_REPLAY_TURNS = 2 as const;
+
+/**
+ * Fraction of `maxInputTokens` that triggers a re-anchor for models without
+ * a long-context pricing tier. Models with a tier re-anchor at the tier
+ * boundary so routine turns stay at standard rates.
+ */
+export const REANCHOR_INPUT_FRACTION = 0.8 as const;
+
+/**
+ * Decides whether the next turn must break the server-side response chain
+ * and start fresh with a bounded replay window. `frozenChainInputTokens` is
+ * the last accepted turn's provider-reported input count, which equals the
+ * chain size at that turn. Unknown models never re-anchor: no guessed limits.
+ *
+ * This bounds worst-case spend deterministically. A well-caching chain below
+ * the threshold is cheaper left chained; past the threshold the replayed
+ * window restores standard pricing instead of paying long-context rates (or
+ * dying at the window) on the full chain.
+ */
+export function shouldReanchorHistory(
+  modelId: string,
+  frozenChainInputTokens: number | null,
+): boolean {
+  if (frozenChainInputTokens === null || frozenChainInputTokens < 0) {
+    return false;
+  }
+  const profile = getVerifiedGenerationModel(modelId);
+  if (profile === undefined) {
+    return false;
+  }
+  const threshold =
+    profile.longContextThresholdTokens ??
+    Math.floor(profile.maxInputTokens * REANCHOR_INPUT_FRACTION);
+  return frozenChainInputTokens > threshold;
+}
 
 /** Instruction appended for continuation attempts within the same turn. */
 export function buildContinuationInstruction(turnIndex: TurnIndex): string {
@@ -77,10 +129,12 @@ export type GenerationInputItem = Readonly<Record<string, unknown>>;
 /**
  * Builds the canonical Responses `input` array.
  *
- * - The `developer` message carries only the job developer prompt, verbatim.
- *   It never receives a generated instruction: a per-turn templated preamble
- *   would break the byte-identical prompt-cache prefix across turns. When the
- *   job has no developer prompt, the developer message is omitted entirely.
+ * - The `developer` message starts with a constant instruction block
+ *   (`DEVELOPER_INSTRUCTION`) followed by the job developer prompt, verbatim.
+ *   The block is turn-free by design so the message stays byte-identical
+ *   across turns for prompt-cache reuse while always carrying the marker
+ *   protocol. It is always present, even when the job has no developer
+ *   prompt.
  * - The provider rejects `input_file` inside developer-role messages, so
  *   developer files are attached to the user message as file content instead.
  * - Prior accepted turns are replayed as `assistant` messages only when the
@@ -99,14 +153,18 @@ export function buildGenerationInput(
 
   const items: GenerationInputItem[] = [];
 
+  const developerContent: Record<string, unknown>[] = [
+    { type: "input_text", text: DEVELOPER_INSTRUCTION },
+  ];
   const developerPrompt = params.developerPrompt;
   if (developerPrompt !== undefined && developerPrompt.trim().length > 0) {
-    items.push({
-      type: "message",
-      role: "developer",
-      content: [{ type: "input_text", text: developerPrompt }],
-    });
+    developerContent.push({ type: "input_text", text: developerPrompt });
   }
+  items.push({
+    type: "message",
+    role: "developer",
+    content: developerContent,
+  });
 
   if (params.previousResponseId === null && params.priorAcceptedTurns) {
     for (const prior of params.priorAcceptedTurns) {

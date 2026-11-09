@@ -113,6 +113,7 @@ interface JobDoRpcStub {
   pauseJob(): Promise<JobStateResponse>;
   resumeJob(): Promise<JobStateResponse>;
   retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse>;
+  updateJudgeConfig(config: unknown): Promise<JobStateResponse>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
   initializeBranch(snapshot: BranchSnapshot): Promise<BranchCreationOutcome>;
   listTurns(
@@ -267,6 +268,13 @@ async function routeJobsRequest(request: Request, env: Env): Promise<Response> {
       assertApplicationOrigin(request, env);
       rejectUnknownQuery(url, []);
       return reviewJob(request, env, jobId);
+    case "judge-config":
+      if (method !== "POST" && method !== "PUT") {
+        return methodNotAllowed(["POST", "PUT"]);
+      }
+      assertApplicationOrigin(request, env);
+      rejectUnknownQuery(url, []);
+      return updateJudgeConfig(request, env, jobId);
     case "branch":
       if (method !== "POST") {
         return methodNotAllowed(["POST"]);
@@ -422,6 +430,24 @@ async function pauseJob(env: Env, jobId: JobId): Promise<Response> {
   const stub = getJobStub(env, jobId);
   try {
     return jsonResponse(await stub.pauseJob());
+  } catch (err: unknown) {
+    return rpcErrorResponse(err);
+  }
+}
+
+/**
+ * Replaces the job's judge configuration while halted. Shape validation is
+ * enforced inside `JobDO` against the declared judge contract.
+ */
+async function updateJudgeConfig(
+  request: Request,
+  env: Env,
+  jobId: JobId,
+): Promise<Response> {
+  const parsedBody = await readControlJson(request);
+  const stub = getJobStub(env, jobId);
+  try {
+    return jsonResponse(await stub.updateJudgeConfig(parsedBody));
   } catch (err: unknown) {
     return rpcErrorResponse(err);
   }
@@ -2113,6 +2139,12 @@ function rpcErrorResponse(err: unknown): Response {
   }
   if (message.includes("pauseJob requires an active job")) {
     return conflict("Job is not in a pausable state", "job_not_pausable");
+  }
+  if (message.includes("updateJudgeConfig requires a halted or ready job")) {
+    return conflict("Judge configuration can only change while the job is halted", "job_not_halted");
+  }
+  if (message.includes("judge_config_json")) {
+    return errorResponse(400, "invalid_judge_config", "Judge configuration does not match the declared judge contract");
   }
   const lowerMessage = message.toLowerCase();
   if (lowerMessage.includes("not found") || lowerMessage.includes("no such job")) {

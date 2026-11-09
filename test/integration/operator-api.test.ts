@@ -446,6 +446,102 @@ describe("operator API diagnostics", () => {
     expect(calls.some((call) => call.url.endsWith("/cancel"))).toBe(true);
   });
 
+  it("replaces the judge config while halted and rejects edits while running", async () => {
+    installProviderMock(() => providerJson({ id: "resp_judge_edit", status: "queued" }));
+
+    const jobId = nextJobId("job_operator_judge_edit");
+    const created = await postJob(jobId, {
+      config: {
+        judge: {
+          enabled: true,
+          provider: "openrouter",
+          apiRoot: "https://openrouter.ai/api/v1",
+          secretName: "OPENROUTER_API_KEY",
+          model: "deepseek-v4.1-flash-1017",
+          transport: "chat_completions",
+          historyMode: "stateless",
+          fileDeliveryMode: "inline",
+          includePrior: false,
+          maxGradeThreshold: 70,
+          injectOnFail: true,
+          injectOnPass: false,
+          developerPrompt: "",
+        },
+      },
+    });
+    expect(created.status).toBe(201);
+    trackJobId(jobId);
+    await waitForJobStatus(jobId, ["running"]);
+
+    const runningEdit = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/judge-config`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: APP_ORIGIN },
+        body: JSON.stringify({ enabled: false }),
+      },
+    );
+    expect(runningEdit.status).toBe(409);
+    const runningEditBody = (await runningEdit.json()) as ErrorBody;
+    expect(runningEditBody.error.code).toBe("job_not_halted");
+
+    const paused = await mainWorker.fetch(`https://${APP_HOST}/api/jobs/${jobId}/pause`, {
+      method: "POST",
+      headers: { origin: APP_ORIGIN },
+    });
+    expect(paused.status).toBe(200);
+
+    const fixedJudge = {
+      enabled: true,
+      provider: "openrouter",
+      apiRoot: "https://openrouter.ai/api/v1",
+      secretName: "OPENROUTER_API_KEY",
+      model: "deepseek/deepseek-v4.1-flash-1017",
+      transport: "chat_completions",
+      historyMode: "stateless",
+      fileDeliveryMode: "inline",
+      includePrior: false,
+      maxGradeThreshold: 70,
+      injectOnFail: true,
+      injectOnPass: false,
+      developerPrompt: "",
+    };
+    const updated = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/judge-config`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: APP_ORIGIN },
+        body: JSON.stringify(fixedJudge),
+      },
+    );
+    expect(updated.status).toBe(200);
+    const updatedBody = (await updated.json()) as JobStateBody;
+    expect(updatedBody.job.config.judge).toMatchObject({
+      model: "deepseek/deepseek-v4.1-flash-1017",
+    });
+
+    const malformed = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/judge-config`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: APP_ORIGIN },
+        body: JSON.stringify({ enabled: true, model: "x" }),
+      },
+    );
+    expect(malformed.status).toBe(400);
+    const malformedBody = (await malformed.json()) as ErrorBody;
+    expect(malformedBody.error.code).toBe("invalid_judge_config");
+
+    const fragment = await mainWorker.fetch(
+      `https://${APP_HOST}/api/jobs/${jobId}/fragment`,
+    );
+    expect(fragment.status).toBe(200);
+    const html = await fragment.text();
+    expect(html).toContain("Judge configuration");
+    expect(html).toContain("deepseek/deepseek-v4.1-flash-1017");
+    expect(html).toContain('class="judge-config-edit"');
+  });
+
   it("probes the job-declared judge alongside the main provider", async () => {
     installProviderMock(() => providerJson({ id: "resp_unused", status: "queued" }));
 

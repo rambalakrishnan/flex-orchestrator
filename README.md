@@ -138,8 +138,8 @@ Generation uses Flex background Responses and never falls back to standard tier.
 
 - Browser state polling runs every 12 seconds while work is active. An open job dialog refreshes its fragment on the same cadence.
 - Active jobs expose **Pause Job**, which halts scheduling, cancels the in-flight provider response (best-effort), and freezes pending judge calls without settling them. Accepted turns are untouched. **Resume Job** on `paused_operator` continues from the current turn without spending a retry; on `failed`, `paused_dispatch`, or `paused_storage` it retries the current turn. **Retry Turn** is available on the current turn for those states and `paused_review`; it starts a manual retry without changing automatic recovery counters.
+- Unaccepted turns show their latest candidate output with its structural status, so a stuck turn's actual response is always visible. **Force Accept & Continue** (failed or paused jobs) accepts that candidate despite its structural status, records `operator_force_accepted`, and advances to the next turn.
 - Failure banners show the persisted error code and message. The attempts table shows sanitized provider error details parsed from attempt diagnostics.
-- Branch initialization consumes a complete snapshot in one local transaction. Branch activation follows file protection and conditional superseding of the quiescent parent. Branch snapshots are bounded to 8,000,000 encoded bytes.
 - Exports remain available in every job state and stream pages and one artifact at a time.
   - **Markdown:** accepted deliverables only, with the included turn range and status.
   - **Final Markdown:** `GET /api/jobs/:id/export/markdown` concatenates accepted deliverables with turn markers stripped; completed jobs show a **Download Final Markdown** button.

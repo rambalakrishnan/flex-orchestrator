@@ -733,7 +733,8 @@ export interface AppendTurnCommand {
 export type OperatorReviewDecision =
   | { readonly kind: "accept_with_warning"; readonly note?: string }
   | { readonly kind: "manual_retry" }
-  | { readonly kind: "cancel_job"; readonly reason?: string };
+  | { readonly kind: "cancel_job"; readonly reason?: string }
+  | { readonly kind: "force_accept_latest"; readonly note?: string };
 
 export interface JobSummaryItem {
   readonly jobId: JobId;

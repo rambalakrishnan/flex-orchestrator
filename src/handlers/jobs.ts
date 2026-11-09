@@ -55,7 +55,7 @@ import type {
   TurnPromptSpec,
 } from "../types.ts";
 import { renderJobDetail, renderJobList } from "../views/jobs.ts";
-import type { JobDeliverable } from "../views/jobs.ts";
+import type { JobDeliverable, PendingCandidatePreview } from "../views/jobs.ts";
 
 const JOBS_PATH = "/api/jobs";
 const JOBS_PATH_PREFIX = `${JOBS_PATH}/`;
@@ -115,6 +115,15 @@ interface JobDoRpcStub {
   retryTurn(turnIndex: TurnIndex): Promise<JobStateResponse>;
   updateJudgeConfig(config: unknown): Promise<JobStateResponse>;
   setTurnPinned(turnIndex: TurnIndex, pinned: boolean): Promise<JobStateResponse>;
+  getLatestCandidate(turnIndex: TurnIndex): Promise<{
+    readonly candidateId: string;
+    readonly attemptId: string;
+    readonly attemptNumber: number;
+    readonly structuralStatus: string;
+    readonly deliverableBytes: number;
+    readonly text: string | null;
+    readonly warningMessages: readonly string[];
+  } | null>;
   captureBranchSnapshot(forkTurnIndex: TurnIndex): Promise<BranchSnapshotCapture>;
   initializeBranch(snapshot: BranchSnapshot): Promise<BranchCreationOutcome>;
   listTurns(
@@ -632,7 +641,7 @@ async function getJobFragment(env: Env, jobId: JobId): Promise<Response> {
     if (state === null) {
       return notFound("Job not found");
     }
-    const { deliverables, turns } = await collectTurnFragment(stub);
+    const { deliverables, pendingCandidates, turns } = await collectTurnFragment(stub);
     const attempts = await collectFragmentRows((request) =>
       stub.listAttempts(request),
     );
@@ -640,7 +649,7 @@ async function getJobFragment(env: Env, jobId: JobId): Promise<Response> {
       stub.listJudgeCalls(request),
     );
     return htmlFragmentResponse(
-      renderJobDetail(state, deliverables, turns, attempts, judgeCalls),
+      renderJobDetail(state, deliverables, pendingCandidates, turns, attempts, judgeCalls),
     );
   } catch (err: unknown) {
     return rpcErrorResponse(err);
@@ -648,16 +657,18 @@ async function getJobFragment(env: Env, jobId: JobId): Promise<Response> {
 }
 
 /**
- * Collects the turn table rows and accepted turn deliverables for the detail
- * fragment. Turn pages are read with an internal primary-key cursor and a
- * fixed page cap, so a job with many historical turns cannot spin the request
- * indefinitely.
+ * Collects the turn table rows, accepted turn deliverables, and the latest
+ * candidate preview for each unaccepted turn. Turn pages are read with an
+ * internal primary-key cursor and a fixed page cap, so a job with many
+ * historical turns cannot spin the request indefinitely.
  */
 async function collectTurnFragment(stub: JobDoRpcStub): Promise<{
   readonly deliverables: readonly JobDeliverable[];
+  readonly pendingCandidates: readonly PendingCandidatePreview[];
   readonly turns: readonly TurnSummaryRow[];
 }> {
   const deliverables: JobDeliverable[] = [];
+  const pendingCandidates: PendingCandidatePreview[] = [];
   const turns: TurnSummaryRow[] = [];
   let cursor: string | null = null;
 
@@ -674,6 +685,20 @@ async function collectTurnFragment(stub: JobDoRpcStub): Promise<{
         turn.status !== "accepted" &&
         turn.status !== "accepted_with_warning"
       ) {
+        const latest = await stub.getLatestCandidate(turn.turn_index);
+        if (latest !== null) {
+          pendingCandidates.push({
+            turnIndex: turn.turn_index,
+            status: turn.status,
+            candidateId: latest.candidateId,
+            attemptId: latest.attemptId,
+            attemptNumber: latest.attemptNumber,
+            structuralStatus: latest.structuralStatus,
+            deliverableBytes: latest.deliverableBytes,
+            text: latest.text,
+            warningMessages: latest.warningMessages,
+          });
+        }
         continue;
       }
       const candidateId = turn.accepted_candidate_id;
@@ -700,7 +725,7 @@ async function collectTurnFragment(stub: JobDoRpcStub): Promise<{
     cursor = page.nextCursor;
   }
 
-  return { deliverables, turns };
+  return { deliverables, pendingCandidates, turns };
 }
 
 /**
@@ -1782,11 +1807,24 @@ function parseReviewDecision(value: unknown): OperatorReviewDecision {
       ? { kind: "cancel_job" }
       : { kind: "cancel_job", reason };
   }
+  if (kind === "force_accept_latest") {
+    const note = body.note;
+    if (note !== undefined && typeof note !== "string") {
+      throw new HttpError(
+        400,
+        "invalid_review_decision",
+        "note must be a string when provided",
+      );
+    }
+    return note === undefined
+      ? { kind: "force_accept_latest" }
+      : { kind: "force_accept_latest", note };
+  }
 
   throw new HttpError(
     400,
     "invalid_review_decision",
-    "kind must be one of accept_with_warning, manual_retry, or cancel_job",
+    "kind must be one of accept_with_warning, manual_retry, force_accept_latest, or cancel_job",
   );
 }
 

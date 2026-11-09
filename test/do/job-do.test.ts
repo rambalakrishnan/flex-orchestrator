@@ -764,6 +764,91 @@ describe("JobDO generation lifecycle", () => {
     const branchTurns = await child.listTurns({ limit: 1 });
     expect(branchTurns.items[0]!.marginal_input_tokens).toBe(12);
   });
+
+  it("force-accepts the latest candidate of a failed turn and advances", async () => {
+    const jobId = nextJobId();
+    const bodiesByResponse: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const method = init?.method ?? "GET";
+        if (method === "POST" && url.endsWith("/responses")) {
+          const attempt = Object.keys(bodiesByResponse).length + 1;
+          const responseId = `resp_force_${attempt}`;
+          bodiesByResponse[responseId] = `unstyled draft ${attempt}`;
+          return new Response(
+            JSON.stringify({ id: responseId, model: "gpt-5", status: "queued" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const match = /\/responses\/(resp_force_\d+)$/.exec(url);
+        if (method === "GET" && match !== null) {
+          const responseId = match[1]!;
+          return new Response(
+            JSON.stringify({
+              id: responseId,
+              model: "gpt-5",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: bodiesByResponse[responseId] }],
+                },
+              ],
+              usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected provider call: ${method} ${url}`);
+      }),
+    );
+    const stub = stubFor(jobId);
+
+    await stub.createJob({
+      jobId,
+      title: "force accept job",
+      config: JOB_CONFIG,
+      initialTurns: [
+        { turnIndex: 1, promptText: "Turn 1.", attachmentFileIds: [] },
+        { turnIndex: 2, promptText: "Turn 2.", attachmentFileIds: [] },
+      ],
+    });
+    // Markerless output consumes continuations, then fails the turn.
+    for (let delivery = 1; delivery <= 4; delivery += 1) {
+      await stub.receiveWebhookDelivery({
+        webhookId: `wh_force_${delivery}`,
+        timestampSeconds: 1_760_000_000,
+        eventType: "response.completed",
+        responseId: `resp_force_${delivery}`,
+        rawPayload: new ArrayBuffer(0),
+        receivedAtMs: 1_760_000_000_000,
+      });
+    }
+    const failed = await stub.getState();
+    if (failed === null) throw new Error("expected job state");
+    expect(failed.job.status).toBe("failed");
+    expect(failed.turns[0]!.status).toBe("failed");
+
+    const latest = await stub.getLatestCandidate(1);
+    expect(latest).not.toBeNull();
+    expect(latest!.structuralStatus).toBe("missing_tag");
+    expect(latest!.text).toContain("unstyled draft");
+
+    const advanced = await stub.applyOperatorDecision({ kind: "force_accept_latest" });
+    expect(advanced.job.status).toBe("running");
+    expect(advanced.job.currentTurnIndex).toBe(2);
+    expect(advanced.turns[0]!.status).toBe("accepted");
+    expect(advanced.turns[0]!.warningMessages).toContain("operator_force_accepted");
+    expect(advanced.turns[0]!.warningMessages).toContain(
+      "force_accepted_structural_status:missing_tag",
+    );
+    expect(advanced.activeAttempt).not.toBeNull();
+    expect(advanced.activeAttempt!.turnIndex).toBe(2);
+  });
 });
 
 describe("JobDO judge steering configuration", () => {

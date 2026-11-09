@@ -1104,6 +1104,9 @@ export class JobDO extends DurableObject<Env> {
       case "manual_retry":
         await this.performManualRetry(job);
         break;
+      case "force_accept_latest":
+        await this.forceAcceptLatestCandidate(job, decision.note);
+        break;
       case "cancel_job":
         await this.cancelJob(job, decision.reason);
         break;
@@ -1933,6 +1936,46 @@ export class JobDO extends DurableObject<Env> {
       nextCursor:
         hasMore && items.length > 0 ? items[items.length - 1]!.judge_call_id : null,
       hasMore,
+    };
+  }
+
+  /**
+   * Returns the latest candidate (by attempt number) for a turn, including
+   * its deliverable text, so the operator can inspect what a stuck turn
+   * actually produced. Returns null when the turn has no candidates.
+   */
+  async getLatestCandidate(turnIndex: TurnIndex): Promise<{
+    readonly candidateId: string;
+    readonly attemptId: string;
+    readonly attemptNumber: number;
+    readonly structuralStatus: TurnCandidateSummaryRow["structural_status"];
+    readonly deliverableBytes: number;
+    readonly text: string | null;
+    readonly warningMessages: readonly string[];
+  } | null> {
+    const index = assertTurnIndex(turnIndex, "getLatestCandidate.turnIndex");
+    let selected: TurnCandidateSummaryRow | null = null;
+    let selectedAttemptNumber = -1;
+    for (const candidate of this.listAllCandidateSummaries(index)) {
+      const attempt = getGenerationAttemptSummary(this.sql, candidate.attempt_id);
+      const attemptNumber = attempt === null ? 0 : attempt.attempt_number;
+      if (attemptNumber >= selectedAttemptNumber) {
+        selected = candidate;
+        selectedAttemptNumber = attemptNumber;
+      }
+    }
+    if (selected === null) {
+      return null;
+    }
+    const text = getTurnCandidateDeliverableText(this.sql, selected.candidate_id);
+    return {
+      candidateId: selected.candidate_id,
+      attemptId: selected.attempt_id,
+      attemptNumber: selectedAttemptNumber,
+      structuralStatus: selected.structural_status,
+      deliverableBytes: selected.deliverable_bytes,
+      text,
+      warningMessages: readStringArray(selected.warning_json),
     };
   }
 
@@ -4377,6 +4420,91 @@ export class JobDO extends DurableObject<Env> {
       acceptedWithWarning: true,
       warningJson: JSON.stringify(warnings),
       marginalInputTokens: attemptMarginalInputTokens(attempt),
+      nowIso,
+    });
+
+    const fresh = requireJob(this.sql, job.job_id);
+    const lastIndex = this.getLastTurnIndex();
+    const nextStatus = fresh.accepted_turn_index >= lastIndex ? "completed" : "running";
+    const updated = updateJobStatusAndRevision(this.sql, {
+      jobId: job.job_id,
+      status: nextStatus,
+      activeAttemptId: null,
+      currentTurnIndex: turn.turn_index,
+      lastErrorCode: null,
+      lastErrorDetail: null,
+      usageSummaryJson: JSON.stringify(this.computeUsageAggregate()),
+      updatedAt: nowIso,
+    });
+    await this.publishAndSchedule(updated);
+    if (nextStatus === "completed") {
+      await this.registryStub().releaseJobFileRefs(job.job_id);
+    } else {
+      await this.startNextTurnIfEligible();
+    }
+  }
+
+  /**
+   * Force-accepts the current turn's latest candidate regardless of
+   * structural status and advances. The escape hatch for turns stuck in
+   * retry loops over mechanical issues (e.g. a missing marker on an
+   * otherwise complete deliverable). Requires a non-empty deliverable and
+   * a recorded provider response id; records `operator_force_accepted`
+   * plus the bypassed structural status in the candidate warnings.
+   */
+  private async forceAcceptLatestCandidate(
+    job: JobRow,
+    note: string | undefined
+  ): Promise<void> {
+    if (!PAUSED_JOB_STATUSES.has(job.status) && job.status !== "failed") {
+      throw new Error("force_accept_latest requires a paused or failed job");
+    }
+    const turn = getTurnSummary(this.sql, job.current_turn_index);
+    if (turn === null) {
+      throw new Error(`Turn not found: ${job.current_turn_index}`);
+    }
+    if (turn.status === "accepted" || turn.status === "accepted_with_warning") {
+      throw new Error("force_accept_latest requires an unaccepted current turn");
+    }
+    const candidates = this.listAllCandidateSummaries(turn.turn_index);
+    let selected: TurnCandidateSummaryRow | null = null;
+    let selectedAttemptNumber = -1;
+    for (const candidate of candidates) {
+      if (candidate.deliverable_bytes <= 0) {
+        continue;
+      }
+      const attempt = getGenerationAttemptSummary(this.sql, candidate.attempt_id);
+      const attemptNumber = attempt === null ? 0 : attempt.attempt_number;
+      if (attemptNumber >= selectedAttemptNumber) {
+        selected = candidate;
+        selectedAttemptNumber = attemptNumber;
+      }
+    }
+    if (selected === null) {
+      throw new Error("No candidate with deliverable text is available for force acceptance");
+    }
+    const attempt = getGenerationAttemptSummary(this.sql, selected.attempt_id);
+    if (attempt === null || attempt.provider_response_id === null) {
+      throw new Error("Selected candidate has no recorded provider response id");
+    }
+
+    const warnings = readStringArray(selected.warning_json);
+    warnings.push("operator_force_accepted", `force_accepted_structural_status:${selected.structural_status}`);
+    if (note !== undefined && note.trim().length > 0) {
+      warnings.push(note);
+    }
+
+    const nowIso = toIso(now());
+    acceptTurnCandidate(this.storage, {
+      jobId: job.job_id,
+      turnIndex: turn.turn_index,
+      candidateId: selected.candidate_id,
+      attemptId: attempt.attempt_id,
+      responseId: attempt.provider_response_id,
+      acceptedWithWarning: true,
+      warningJson: JSON.stringify(warnings),
+      marginalInputTokens: attemptMarginalInputTokens(attempt),
+      overrideStructuralStatus: true,
       nowIso,
     });
 

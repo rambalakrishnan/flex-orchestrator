@@ -341,6 +341,7 @@ No browser-based E2E tests are defined; `public/app.js` is verified by hand.
 - [ ] A failed job detail shows its persisted error code and message, **Resume Job**, and **Retry Turn** on the current turn.
 - [ ] **Resume Job** on a failed, `paused_dispatch`, or `paused_storage` job starts a new manual attempt and does not reset automatic recovery counters.
 - [ ] **Pause Job** on an active job stops scheduling, cancels the in-flight provider response, and freezes pending judge calls; a late completion does not settle the turn. **Resume Job** on `paused_operator` continues the same turn without spending a retry.
+- [ ] Unaccepted turns render a latest-output card with structural status and attempt number; **Force Accept & Continue** on a failed or paused job accepts it with `operator_force_accepted` recorded and advances.
 - [ ] Creating a job with an external `previous_response_id` shows that ID as the initial anchor, records the `external_previous_response_id:<id>` warning, and replaces it after turn 1 is accepted.
 - [ ] Accepted and latest-attempt provider response IDs are visible in the job detail and in each turn row.
 - [ ] **Count Tokens** succeeds for each pending turn; with an invalid provider credential it shows a sanitized provider status/code and the **Health Check** probes report the failure without exposing the secret.

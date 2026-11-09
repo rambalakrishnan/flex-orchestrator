@@ -150,6 +150,7 @@ describe("long-form preview expanders", () => {
     const html = renderJobDetail(
       jobState(),
       deliverables(longText),
+      [],
       [turnRow()],
       attempts(),
       [judgeRow()],
@@ -171,6 +172,7 @@ describe("long-form preview expanders", () => {
     const html = renderJobDetail(
       jobState(),
       deliverables("Short deliverable."),
+      [],
       [turnRow()],
       attempts(),
       [judgeRow({ comment: null })],
@@ -187,6 +189,7 @@ describe("usage cost split", () => {
     const html = renderJobDetail(
       jobState(),
       deliverables("Short deliverable."),
+      [],
       [turnRow()],
       attempts(),
       [judgeRow()],
@@ -219,6 +222,7 @@ describe("usage cost split", () => {
         },
       }),
       deliverables("Short deliverable."),
+      [],
       [turnRow()],
       attempts(),
       [judgeRow()],
@@ -237,6 +241,7 @@ describe("turn replay pins", () => {
     const html = renderJobDetail(
       jobState(),
       deliverables("Short deliverable."),
+      [],
       [turnRow(), turnRow({ turn_index: 2, pinned_in_replay: 1 })],
       attempts(),
       [judgeRow()],
@@ -247,5 +252,75 @@ describe("turn replay pins", () => {
     expect(html).toContain('data-turn-index="2" data-pinned="true"');
     expect(html).toContain(">Pin</button>");
     expect(html).toContain(">Unpin</button>");
+  });
+});
+
+describe("pending candidate previews", () => {
+  it("renders the latest unaccepted output with its structural status", () => {
+    const html = renderJobDetail(
+      jobState(),
+      [],
+      [
+        {
+          turnIndex: 4,
+          status: "failed",
+          candidateId: "job_views:t4:a3:candidate",
+          attemptId: "job_views:t4:a3",
+          attemptNumber: 3,
+          structuralStatus: "missing_tag",
+          deliverableBytes: 48,
+          text: "Conformance text without a marker.",
+          warningMessages: ["reused_prior_marker"],
+        },
+      ],
+      [turnRow({ turn_index: 4, status: "failed" })],
+      attempts(),
+      [judgeRow()],
+    );
+
+    expect(html).toContain("Latest unaccepted output");
+    expect(html).toContain('data-expand-id="pending-turn-4"');
+    expect(html).toContain("missing_tag");
+    expect(html).toContain("Attempt 3");
+    expect(html).toContain("Conformance text without a marker.");
+    expect(html).toContain("reused_prior_marker");
+  });
+
+  it("omits the section when every turn is accepted", () => {
+    const html = renderJobDetail(
+      jobState(),
+      deliverables("Short deliverable."),
+      [],
+      [turnRow()],
+      attempts(),
+      [judgeRow()],
+    );
+
+    expect(html).not.toContain("Latest unaccepted output");
+  });
+});
+
+describe("force accept control", () => {
+  it("renders Force Accept on failed jobs and hides it while running", () => {
+    const failedHtml = renderJobDetail(
+      jobState({ job: { ...jobState().job, status: "failed" } }),
+      [],
+      [],
+      [turnRow()],
+      attempts(),
+      [],
+    );
+    expect(failedHtml).toContain('data-action="force-accept"');
+    expect(failedHtml).toContain("Force Accept &amp; Continue");
+
+    const runningHtml = renderJobDetail(
+      jobState({ job: { ...jobState().job, status: "running" } }),
+      [],
+      [],
+      [turnRow()],
+      attempts(),
+      [],
+    );
+    expect(runningHtml).not.toContain('data-action="force-accept"');
   });
 });

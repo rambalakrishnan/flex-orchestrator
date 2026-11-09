@@ -75,6 +75,12 @@ export interface AcceptTurnCandidateParams {
   readonly warningJson?: string;
   readonly marginalInputTokens?: number | null;
   readonly nowIso: string;
+  /**
+   * Operator override: accept despite a non-`valid` structural status.
+   * Callers must record the bypass in warnings; deliverable bytes are
+   * still required.
+   */
+  readonly overrideStructuralStatus?: boolean;
 }
 
 /**
@@ -574,7 +580,10 @@ export function acceptTurnCandidate(
           `Turn candidate ${params.candidateId} belongs to attempt ${candidate.attempt_id}, expected ${params.attemptId}`
         );
       }
-      if (candidate.structural_status !== "valid" || candidate.deliverable_bytes <= 0) {
+      if (
+        (candidate.structural_status !== "valid" && params.overrideStructuralStatus !== true) ||
+        candidate.deliverable_bytes <= 0
+      ) {
         throw new Error(
           `Turn candidate ${params.candidateId} cannot be accepted: structural_status=${candidate.structural_status}, deliverable_bytes=${candidate.deliverable_bytes}`
         );

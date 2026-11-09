@@ -23,6 +23,18 @@ export interface JobDeliverable {
   readonly text: string;
 }
 
+export interface PendingCandidatePreview {
+  readonly turnIndex: TurnIndex;
+  readonly status: TurnStatus;
+  readonly candidateId: string;
+  readonly attemptId: string;
+  readonly attemptNumber: number;
+  readonly structuralStatus: string;
+  readonly deliverableBytes: number;
+  readonly text: string | null;
+  readonly warningMessages: readonly string[];
+}
+
 function renderStatusBadge(status: string): string {
   return `<span class="status status-${escapeHtml(status.toLowerCase())}">${escapeHtml(status)}</span>`;
 }
@@ -134,6 +146,30 @@ function renderDeliverable(
   ].join("");
 }
 
+function renderPendingCandidate(candidate: PendingCandidatePreview): string {
+  const warnings =
+    candidate.warningMessages.length === 0
+      ? ""
+      : `<span class="candidate-warnings">${escapeHtml(candidate.warningMessages.join("; "))}</span>`;
+  return [
+    `<section class="deliverable deliverable-pending" data-turn-index="${escapeHtml(String(candidate.turnIndex))}">`,
+    `<header class="deliverable-header">`,
+    `<h3 class="deliverable-turn">Turn ${escapeHtml(String(candidate.turnIndex))}</h3>`,
+    renderStatusBadge(candidate.status),
+    `<span class="candidate-structural turn-response">Latest output: ${renderStatusBadge(candidate.structuralStatus)}</span>`,
+    `<span class="candidate-attempt turn-response">Attempt ${escapeHtml(String(candidate.attemptNumber))}</span>`,
+    warnings,
+    `</header>`,
+    candidate.text === null
+      ? `<p class="empty-state">No deliverable text recorded for the latest attempt.</p>`
+      : renderExpandableContent(
+          `pending-turn-${candidate.turnIndex}`,
+          `<div class="deliverable-content">${renderMarkdown(candidate.text)}</div>`,
+        ),
+    `</section>`,
+  ].join("");
+}
+
 /**
  * Renders the judge result(s) observed for one accepted turn inside its
  * deliverable card. Verdict and grade are escaped when inserted; a judge
@@ -226,6 +262,13 @@ function isRetryTurnStatus(
   return isResumeJobStatus(status) || status === "paused_review";
 }
 
+/** Statuses where the latest candidate may be force-accepted to advance. */
+function isForceAcceptStatus(
+  status: JobStateResponse["job"]["status"],
+): boolean {
+  return isResumeJobStatus(status) || status === "paused_review";
+}
+
 /**
  * Renders the persisted job-level failure as an escaped alert. Either the
  * stable `errorCode` or the free-form `errorMessage` may be present alone; the
@@ -264,6 +307,10 @@ function renderResumeJobButton(jobId: string): string {
 
 function renderPauseJobButton(jobId: string): string {
   return `<button type="button" class="action-button" data-action="pause-job" data-job-id="${escapeHtml(jobId)}">Pause Job</button>`;
+}
+
+function renderForceAcceptButton(jobId: string): string {
+  return `<button type="button" class="action-button action-danger" data-action="force-accept" data-job-id="${escapeHtml(jobId)}">Force Accept &amp; Continue</button>`;
 }
 
 function renderRetryTurnButton(jobId: string, turnIndex: number): string {
@@ -631,6 +678,7 @@ function renderJudgeConfigSection(job: JobStateResponse): string {
 export function renderJobDetail(
   job: JobStateResponse,
   deliverables: readonly JobDeliverable[],
+  pendingCandidates: readonly PendingCandidatePreview[],
   turns: readonly TurnSummaryRow[],
   attempts: readonly GenerationAttemptSummaryRow[],
   judgeCalls: readonly JudgeCallSummaryRow[],
@@ -701,6 +749,9 @@ export function renderJobDetail(
     isResumeJobStatus(job.job.status)
       ? renderResumeJobButton(job.job.jobId)
       : "",
+    isForceAcceptStatus(job.job.status)
+      ? renderForceAcceptButton(job.job.jobId)
+      : "",
     renderCheckHealthButton(job.job.jobId),
     renderJsonlDownloadLink(job.job.jobId),
     renderJsonlInspectButton(job.job.jobId),
@@ -745,6 +796,16 @@ export function renderJobDetail(
     `<h2 class="deliverables-title">Deliverables</h2>`,
     body,
     `</section>`,
+    pendingCandidates.length === 0
+      ? ""
+      : [
+          `<section class="pending-candidates">`,
+          `<h2 class="deliverables-title">Latest unaccepted output</h2>`,
+          ...[...pendingCandidates]
+            .sort((a, b) => a.turnIndex - b.turnIndex)
+            .map(renderPendingCandidate),
+          `</section>`,
+        ].join(""),
     `<section class="detail-section">`,
     `<h3 class="detail-section-title">Turns</h3>`,
     renderTurnsTable(turns, promptTextByTurnIndex, latestAttempts, job),

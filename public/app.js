@@ -952,6 +952,7 @@ async function handleDialogAction(control) {
     action !== "resume-job" &&
     action !== "retry-turn" &&
     action !== "toggle-pin" &&
+    action !== "force-accept" &&
     action !== "check-health" &&
     action !== "inspect-jsonl"
   ) {
@@ -991,6 +992,12 @@ async function handleDialogAction(control) {
     } else if (action === "resume-job") {
       response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/resume", {
         method: "POST",
+      });
+    } else if (action === "force-accept") {
+      response = await fetch("/api/jobs/" + encodeURIComponent(jobId) + "/review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "force_accept_latest" }),
       });
     } else if (action === "toggle-pin") {
       const rawTurnIndex = control.getAttribute("data-turn-index");

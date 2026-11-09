@@ -2231,6 +2231,27 @@ dialog,
   cursor: progress;
 }
 
+.action-button.action-danger {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 11%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+
+.action-button.action-danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+}
+
+/* Pending-candidate cards mirror deliverables with a warning edge. */
+.deliverable-pending {
+  border-left: 3px solid var(--warning);
+}
+
+.candidate-warnings {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
 /* Secondary export link; deliberately quieter than .download-final. */
 .download-jsonl {
   display: inline-flex;

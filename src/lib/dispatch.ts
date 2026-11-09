@@ -41,24 +41,6 @@ import { assertTurnIndex } from "./guards.ts";
 /** Canonical terminal completion marker for a given turn index. */
 export const COMPLETION_MARKER_FORMAT = "<!-- TURN_END:{turnIndex} -->";
 
-/**
- * Developer instruction placed inside `input` (never the deprecated
- * top-level `instructions` field).
- *
- * The model signals only completion. Provider token caps surface as an
- * incomplete response (`capped`) and are continued by the orchestrator with a
- * new attempt; there is no intermediate pause marker.
- */
-export function buildDeveloperInstruction(turnIndex: TurnIndex): string {
-  const complete = COMPLETION_MARKER_FORMAT.replace("{turnIndex}", String(turnIndex));
-  return [
-    `You are producing turn ${turnIndex} of a sequential writing job.`,
-    "Return only the deliverable text for this turn.",
-    `When the turn is complete, end your output with ${complete}.`,
-    "Emit no other marker.",
-  ].join(" ");
-}
-
 /** Instruction appended for continuation attempts within the same turn. */
 export function buildContinuationInstruction(turnIndex: TurnIndex): string {
   return [
@@ -84,9 +66,9 @@ export interface BuildGenerationInputParams {
   readonly attemptKind: GenerationAttemptKind;
   readonly previousResponseId: ResponseId | null;
   readonly priorAcceptedTurns?: readonly PriorAcceptedTurn[];
-  /** Job developer context placed in the developer message after the instruction. */
+  /** Job developer context placed verbatim in the developer message. */
   readonly developerPrompt?: string;
-  /** Developer files attached to that same developer message on every attempt. */
+  /** Developer files attached to the user message on every attempt. */
   readonly developerFileIds?: readonly FileId[];
 }
 
@@ -95,10 +77,12 @@ export type GenerationInputItem = Readonly<Record<string, unknown>>;
 /**
  * Builds the canonical Responses `input` array.
  *
- * - Developer instruction is a `developer` message inside `input`; the job
- *   developer prompt is appended to that same message. The provider rejects
- *   `input_file` inside developer-role messages, so developer files are
- *   attached to the user message as file content instead.
+ * - The `developer` message carries only the job developer prompt, verbatim.
+ *   It never receives a generated instruction: a per-turn templated preamble
+ *   would break the byte-identical prompt-cache prefix across turns. When the
+ *   job has no developer prompt, the developer message is omitted entirely.
+ * - The provider rejects `input_file` inside developer-role messages, so
+ *   developer files are attached to the user message as file content instead.
  * - Prior accepted turns are replayed as `assistant` messages only when the
  *   request is unanchored (`previousResponseId === null`); an anchored request
  *   inherits that context through `previous_response_id`.
@@ -113,22 +97,16 @@ export function buildGenerationInput(
 ): readonly GenerationInputItem[] {
   assertTurnIndex(params.turnIndex, "buildGenerationInput");
 
-  const developerContent: Record<string, unknown>[] = [
-    { type: "input_text", text: buildDeveloperInstruction(params.turnIndex) },
-  ];
+  const items: GenerationInputItem[] = [];
 
   const developerPrompt = params.developerPrompt;
   if (developerPrompt !== undefined && developerPrompt.trim().length > 0) {
-    developerContent.push({ type: "input_text", text: developerPrompt });
-  }
-
-  const items: GenerationInputItem[] = [
-    {
+    items.push({
       type: "message",
       role: "developer",
-      content: developerContent,
-    },
-  ];
+      content: [{ type: "input_text", text: developerPrompt }],
+    });
+  }
 
   if (params.previousResponseId === null && params.priorAcceptedTurns) {
     for (const prior of params.priorAcceptedTurns) {

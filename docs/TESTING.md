@@ -167,7 +167,7 @@ Cover: `src/lib/markdown.ts`, `src/views/jobs.ts`, `src/handlers/jobs.ts`, `src/
 Cover: `src/db/schema.ts`, `test/db/migrations.test.ts`, `test/db/schema.test.ts`.
 
 ### Generation
-**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, `nocache`, places developer messages in `input` (not `instructions`), keeps developer-role content text-only, delivers developer files as user-role `input_file` content deduplicated with turn attachments, and uses exact canonical-request counting.
+**7. Canonical generation request.** Each attempt stores the exact UTF-8 request body used for its sends, omits authorization headers, uses Flex background Responses (`background: true`, `service_tier: "flex"`), selects cache explicitly among `30m`, `12h`, `nocache`, places developer messages in `input` (not `instructions`), keeps developer-role content text-only, delivers developer files as user-role `input_file` content deduplicated with turn attachments, and uses exact canonical-request counting. The developer message carries only the job developer prompt verbatim with no generated per-turn instruction, so it stays byte-identical across turns and attempts for prompt-cache reuse; when the job has no developer prompt, the developer message is omitted entirely.
 
 Long-context classification test points, using mocked counts:
 - **271,999** → not long-context

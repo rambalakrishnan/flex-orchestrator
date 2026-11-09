@@ -12,7 +12,6 @@ import {
   COMPLETION_MARKER_FORMAT,
   applyRetryAfter,
   buildCanonicalGenerationRequest,
-  buildDeveloperInstruction,
   buildGenerationIdempotencyKey,
   buildGenerationInput,
   classifyDispatchResult,
@@ -109,7 +108,7 @@ describe("canonical generation request body (§7)", () => {
   });
 
   it("places developer messages in input and never at the top-level instructions field", () => {
-    const { body } = requestBodyOf(baseGenerationRequestParams());
+    const { body } = requestBodyOf(developerContextGenerationRequestParams());
     const input = asItems(body.input, "input");
 
     expect(Object.keys(body)).not.toContain("instructions");
@@ -119,22 +118,27 @@ describe("canonical generation request body (§7)", () => {
     const developer = asRecord(input[0], "input[0]");
     expect(developer.type).toBe("message");
     expect(developer.role).toBe("developer");
-    const developerText = firstContentItem(developer, "developer").text;
-    expect(typeof developerText).toBe("string");
-    expect(developerText).toContain(`<!-- TURN_END:${BASE_TURN_INDEX} -->`);
-    expect(developerText).not.toContain("TURN_CONTINUE");
-    expect(developerText).not.toContain("<TURN_COMPLETE");
-    expect(developerText).not.toContain("<TURN_CONTINUE");
-    expect(developerText).not.toContain("[[TURN_");
+    expect(asItems(developer.content, "developer.content")).toEqual([
+      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
+    ]);
 
-    expect(requestBodyOf(baseGenerationRequestParams()).request.inputItems).toEqual(
-      input,
+    const { request, body: parsedBody } = requestBodyOf(
+      developerContextGenerationRequestParams(),
     );
+    expect(request.inputItems).toEqual(asItems(parsedBody.input, "input"));
+  });
+
+  it("omits the developer message when the job has no developer prompt", () => {
+    const { body } = requestBodyOf(baseGenerationRequestParams());
+    const input = asItems(body.input, "input");
+
+    expect(input).toHaveLength(1);
+    expect(input[0]?.role).toBe("user");
   });
 
   it("puts the prompt text in the user message with no attachments by default", () => {
     const { body } = requestBodyOf(baseGenerationRequestParams());
-    const user = asRecord(asItems(body.input, "input")[1], "input[1]");
+    const user = asRecord(asItems(body.input, "input")[0], "input[0]");
 
     expect(user.type).toBe("message");
     expect(user.role).toBe("user");
@@ -221,7 +225,7 @@ describe("canonical generation request body (§7)", () => {
 
   it("replaces the prompt text with the continuation directive on continuation attempts", () => {
     const { body } = requestBodyOf(continuationGenerationRequestParams());
-    const user = asRecord(asItems(body.input, "input")[1], "user");
+    const user = asRecord(asItems(body.input, "input")[0], "user");
     const text = firstContentItem(user, "user").text;
 
     expect(typeof text).toBe("string");
@@ -242,7 +246,7 @@ describe("canonical generation request body (§7)", () => {
     const input = asItems(body.input, "input");
     const assistants = assistantMessages(input);
 
-    expect(input[0]?.role).toBe("developer");
+    expect(input[0]?.role).toBe("assistant");
     expect(input[input.length - 1]?.role).toBe("user");
     expect(assistants).toHaveLength(PRIOR_ACCEPTED_TURNS.length);
     expect(assistants.map((item) => firstContentItem(item, "assistant"))).toEqual(
@@ -284,8 +288,6 @@ describe("canonical generation request body (§7)", () => {
 });
 
 describe("developer context in the developer message (§6)", () => {
-  const DEVELOPER_INSTRUCTION = buildDeveloperInstruction(BASE_TURN_INDEX);
-
   function developerContentOf(params: Parameters<typeof buildCanonicalGenerationRequest>[0]) {
     const { body } = requestBodyOf(params);
     const input = asItems(body.input, "input");
@@ -296,11 +298,8 @@ describe("developer context in the developer message (§6)", () => {
   it("keeps developer files out of the developer message and attaches them to the user message", () => {
     const { content, input } = developerContentOf(developerContextGenerationRequestParams());
 
-    expect(content).toEqual([
-      { type: "input_text", text: DEVELOPER_INSTRUCTION },
-      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
-    ]);
-    expect(content.map((item) => item.type)).toEqual(["input_text", "input_text"]);
+    expect(content).toEqual([{ type: "input_text", text: DEVELOPER_PROMPT_TEXT }]);
+    expect(content.map((item) => item.type)).toEqual(["input_text"]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
@@ -312,7 +311,7 @@ describe("developer context in the developer message (§6)", () => {
 
   it("serializes the developer context on initial and continuation attempts alike", () => {
     const initial = developerContentOf(developerContextGenerationRequestParams());
-    expect(initial.content).toHaveLength(2);
+    expect(initial.content).toHaveLength(1);
 
     const continuation = developerContentOf(
       developerContextGenerationRequestParams({
@@ -323,10 +322,6 @@ describe("developer context in the developer message (§6)", () => {
     );
     expect(continuation.content).toEqual(initial.content);
     expect(continuation.content[0]).toEqual({
-      type: "input_text",
-      text: DEVELOPER_INSTRUCTION,
-    });
-    expect(continuation.content[1]).toEqual({
       type: "input_text",
       text: DEVELOPER_PROMPT_TEXT,
     });
@@ -346,16 +341,49 @@ describe("developer context in the developer message (§6)", () => {
     ]);
   });
 
-  it("adds no extra developer blocks for empty or whitespace-only developer context", () => {
+  it("omits the developer message for empty or whitespace-only developer context", () => {
     for (const params of [
       baseGenerationRequestParams(),
       baseGenerationRequestParams({ developerFileIds: [] }),
       baseGenerationRequestParams({ developerPrompt: "   \n\t " }),
       baseGenerationRequestParams({ developerPrompt: "   ", developerFileIds: [""] }),
     ]) {
-      const { content } = developerContentOf(params);
-      expect(content).toEqual([{ type: "input_text", text: DEVELOPER_INSTRUCTION }]);
+      const { body } = requestBodyOf(params);
+      const input = asItems(body.input, "input");
+      expect(input.every((item) => item.role !== "developer")).toBe(true);
     }
+  });
+
+  it("keeps the developer message byte-identical across turns and attempts", () => {
+    const developerMessageOf = (
+      params: Parameters<typeof buildCanonicalGenerationRequest>[0],
+    ): Record<string, unknown> => {
+      const { body } = requestBodyOf(params);
+      const input = asItems(body.input, "input");
+      const developer = input.find((item) => item.role === "developer");
+      if (developer === undefined) {
+        throw new Error("Expected a developer message.");
+      }
+      return developer;
+    };
+
+    const turnOne = developerMessageOf(
+      developerContextGenerationRequestParams({ turnIndex: 1 }),
+    );
+    for (const turnIndex of [2, 3, 4]) {
+      expect(
+        developerMessageOf(developerContextGenerationRequestParams({ turnIndex })),
+      ).toEqual(turnOne);
+    }
+    expect(
+      developerMessageOf(
+        developerContextGenerationRequestParams({
+          attemptKind: "continuation",
+          continuationIndex: 1,
+          previousResponseId: ANCHOR_RESPONSE_ID,
+        }),
+      ),
+    ).toEqual(turnOne);
   });
 
   it("deduplicates developer file ids in order on the user message", () => {
@@ -372,10 +400,7 @@ describe("developer context in the developer message (§6)", () => {
       }),
     );
 
-    expect(content).toEqual([
-      { type: "input_text", text: DEVELOPER_INSTRUCTION },
-      { type: "input_text", text: DEVELOPER_PROMPT_TEXT },
-    ]);
+    expect(content).toEqual([{ type: "input_text", text: DEVELOPER_PROMPT_TEXT }]);
 
     const user = asRecord(input[input.length - 1], "user");
     expect(asItems(user.content, "user.content")).toEqual([
@@ -470,7 +495,7 @@ describe("1-based turn index enforcement (§7)", () => {
       previousResponseId: null,
     });
 
-    expect(items[0]?.role).toBe("developer");
+    expect(items[0]?.role).toBe("user");
     expect(items[items.length - 1]?.role).toBe("user");
 
     const request = buildCanonicalGenerationRequest(
@@ -478,10 +503,7 @@ describe("1-based turn index enforcement (§7)", () => {
     );
     expect(request.idempotencyKey).toBe(`${BASE_JOB_ID}:t1:a1:c0`);
     const body = parseBody(request.requestBody);
-    const developer = asRecord(asItems(body.input, "input")[0], "input[0]");
-    expect(firstContentItem(developer, "developer").text).toContain(
-      "<!-- TURN_END:1 -->",
-    );
+    expect(asItems(body.input, "input")).toHaveLength(1);
   });
 
   it("accepts every integer turn index above one", () => {

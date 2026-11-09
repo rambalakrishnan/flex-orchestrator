@@ -680,6 +680,17 @@ function classificationParsedTagIndex(outcome: CandidateOutcome): number | null 
       return null;
   }
 }
+function classificationRawTag(outcome: CandidateOutcome): string | null {
+  switch (outcome.classification.kind) {
+    case "terminal":
+    case "trailing_content":
+    case "wrong_index":
+      return outcome.classification.rawTag;
+    default:
+      return null;
+  }
+}
+
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const out = new ArrayBuffer(bytes.byteLength);
@@ -716,6 +727,7 @@ function measureBranchSnapshotBytes(snapshot: BranchSnapshot): number {
       return {
         turn: turn.turn,
         acceptedDeliverable: null,
+        acceptedRawTag: turn.acceptedRawTag,
         attempts: turn.attempts,
         judgeCalls: turn.judgeCalls,
       };
@@ -740,6 +752,7 @@ function serializeBranchSnapshot(snapshot: BranchSnapshot): string {
           : encodeBase64(new Uint8Array(turn.acceptedDeliverable)),
       attempts: turn.attempts,
       judgeCalls: turn.judgeCalls,
+      acceptedRawTag: turn.acceptedRawTag,
     })),
     referencedFileIds: snapshot.referencedFileIds,
     encodedByteLength: snapshot.encodedByteLength,
@@ -1464,6 +1477,7 @@ export class JobDO extends DurableObject<Env> {
           },
           acceptedDeliverable:
             deliverableBlob === null ? null : toArrayBuffer(deliverableBlob),
+          acceptedRawTag: acceptedCandidate === null ? null : acceptedCandidate.raw_tag,
           attempts,
           judgeCalls,
         });
@@ -1651,6 +1665,7 @@ export class JobDO extends DurableObject<Env> {
           attemptId: acceptedAttemptId,
           structuralStatus: "valid",
           parsedTagIndex: turn.turnIndex,
+          rawTag: turnSnapshot.acceptedRawTag,
           deliverable: new Uint8Array(deliverable),
           accepted: false,
           warningJson: JSON.stringify(turn.warningMessages),
@@ -3178,6 +3193,7 @@ export class JobDO extends DurableObject<Env> {
         attemptId: attempt.attempt_id,
         structuralStatus: outcome.structuralStatus,
         parsedTagIndex: classificationParsedTagIndex(outcome),
+        rawTag: classificationRawTag(outcome),
         deliverable,
         accepted: false,
         warningJson: JSON.stringify(warnings),
@@ -3720,6 +3736,7 @@ export class JobDO extends DurableObject<Env> {
         attemptId: attempt.attempt_id,
         turnIndex: turn.turn_index,
         candidateText,
+        observedTag: candidate.raw_tag,
         previousJudgeResponseId:
           config.historyMode === "chained" ? job.last_judge_response_id : null,
         applicableFiles: judgeFiles.files.map((selection) => ({

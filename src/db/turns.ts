@@ -53,6 +53,7 @@ export interface InsertTurnCandidateInput {
   readonly attemptId: string;
   readonly structuralStatus: CandidateStructuralStatus;
   readonly parsedTagIndex: number | null;
+  readonly rawTag?: string | null;
   readonly deliverable: string | Uint8Array | ArrayBuffer | null;
   readonly accepted?: boolean;
   readonly warningJson?: string;
@@ -377,6 +378,7 @@ export function insertTurnCandidate(
   return withSqlErrorMapping(() => {
     const warningJson = input.warningJson ?? "[]";
     const acceptedInt = input.accepted ? 1 : 0;
+    const rawTag = input.rawTag ?? null;
 
     let deliverableBlob: Uint8Array | null = null;
     let deliverableBytes = 0;
@@ -395,19 +397,18 @@ export function insertTurnCandidate(
         "Cannot insert a 'valid' turn candidate with empty deliverable text (§7 empty_output rule)"
       );
     }
-
     const metadataBytes =
       measureByteLength(input.candidateId) +
       measureByteLength(input.attemptId) +
       measureByteLength(input.structuralStatus) +
-      measureByteLength(warningJson);
+      measureByteLength(warningJson) +
+      measureByteLength(rawTag);
 
     const { rowBytes } = assertArtifactAndRowSize(
       deliverableBytes,
       metadataBytes,
       "turn_candidates.row_bytes"
     );
-
     sql.exec(
       `INSERT INTO turn_candidates (
         candidate_id,
@@ -415,18 +416,20 @@ export function insertTurnCandidate(
         attempt_id,
         structural_status,
         parsed_tag_index,
+        raw_tag,
         deliverable_blob,
         deliverable_bytes,
         row_bytes,
         accepted,
         warning_json,
         created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.candidateId,
       input.turnIndex,
       input.attemptId,
       input.structuralStatus,
       input.parsedTagIndex,
+      rawTag,
       deliverableBlob,
       deliverableBytes,
       rowBytes,
@@ -441,6 +444,7 @@ export function insertTurnCandidate(
       attempt_id: input.attemptId,
       structural_status: input.structuralStatus,
       parsed_tag_index: input.parsedTagIndex,
+      raw_tag: rawTag,
       deliverable_bytes: deliverableBytes,
       row_bytes: rowBytes,
       accepted: acceptedInt,

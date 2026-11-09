@@ -90,6 +90,8 @@ export interface BuildJudgeRequestParams {
   readonly attemptId: AttemptId;
   readonly turnIndex: TurnIndex;
   readonly candidateText: string;
+  /** Verbatim turn-end marker bytes observed by the structural classifier, or null when none was recorded. */
+  readonly observedTag: string | null;
   readonly previousJudgeResponseId: ResponseId | null;
   readonly applicableFiles: readonly JudgeApplicableFile[];
   readonly priorAcceptedOutputs?: readonly PriorAcceptedOutput[];
@@ -180,8 +182,13 @@ export function encodeBase64(bytes: Uint8Array): string {
 export function buildJudgeInstruction(params: {
   readonly turnIndex: TurnIndex;
   readonly expectedTagIndex: TurnIndex;
+  readonly observedTag: string | null;
 }): string {
-  return `Evaluate the candidate deliverable for the declared turn. Expected turn index: ${params.expectedTagIndex}. Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.`;
+  const tagEvidence =
+    params.observedTag === null
+      ? "No turn-end marker was recorded for this candidate; report \"tag_matches_expected_step\" as false."
+      : `The turn-end marker observed on this candidate was: ${params.observedTag} Report "tag_matches_expected_step" as true only if that quoted marker is exactly <!-- TURN_END:${params.expectedTagIndex} -->.`;
+  return `Evaluate the candidate deliverable for the declared turn. Expected turn index: ${params.expectedTagIndex}. ${tagEvidence} Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.`;
 }
 
 function buildManifest(params: {
@@ -365,6 +372,7 @@ export function buildJudgeRequest(params: BuildJudgeRequestParams): JudgeRequest
   const generatedInstruction = buildJudgeInstruction({
     turnIndex: params.turnIndex,
     expectedTagIndex: params.turnIndex,
+    observedTag: params.observedTag,
   });
   const trimmedDeveloperPrompt = config.developerPrompt.trim();
   const instruction =

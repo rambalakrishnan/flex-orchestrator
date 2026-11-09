@@ -631,6 +631,7 @@ export interface CursorPage<T> {
 export interface BranchTurnSnapshot {
   readonly turn: TurnRecord;
   readonly acceptedDeliverable: ArrayBuffer | null;
+  readonly acceptedRawTag: string | null;
   readonly attempts: readonly AttemptRecord[];
   readonly judgeCalls: readonly JudgeCallRecord[];
 }

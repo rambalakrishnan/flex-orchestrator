@@ -48,6 +48,7 @@ const BASE_BUILD_PARAMS: BuildJudgeRequestParams = {
   attemptId: "att_1",
   turnIndex: 2,
   candidateText: "candidate deliverable text",
+  observedTag: "<!-- TURN_END:2 -->",
   previousJudgeResponseId: null,
   applicableFiles: [],
   priorAcceptedOutputs: [],
@@ -301,6 +302,35 @@ describe("Chat Completions content shape", () => {
     expect(built.manifest).toMatchObject([
       { fileId: "file_missing", status: "withheld", reason: "inline_bytes_missing" },
     ]);
+  });
+
+  it("carries the verbatim observed marker in the developer message", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge(), {
+        turnIndex: 7,
+        observedTag: "<!--TURN_END : 7-->",
+      }),
+    );
+
+    const request = JSON.parse(built.requestBody) as {
+      readonly messages: readonly { readonly role: string; readonly content: unknown }[];
+    };
+    const developer = request.messages.find((message) => message.role === "developer");
+    expect(typeof developer?.content).toBe("string");
+    expect(developer?.content).toContain("observed on this candidate was: <!--TURN_END : 7-->");
+    expect(developer?.content).toContain("exactly <!-- TURN_END:7 -->");
+  });
+
+  it("directs a false tag verdict in the developer message when no marker was recorded", () => {
+    const built = expectBuilt(
+      build(chatCompletionsJudge(), { turnIndex: 7, observedTag: null }),
+    );
+
+    const request = JSON.parse(built.requestBody) as {
+      readonly messages: readonly { readonly role: string; readonly content: unknown }[];
+    };
+    const developer = request.messages.find((message) => message.role === "developer");
+    expect(developer?.content).toContain("No turn-end marker was recorded for this candidate");
   });
 });
 
@@ -710,6 +740,7 @@ describe("developer prompt composition", () => {
   const generatedInstruction = buildJudgeInstruction({
     turnIndex: BASE_BUILD_PARAMS.turnIndex,
     expectedTagIndex: BASE_BUILD_PARAMS.turnIndex,
+    observedTag: BASE_BUILD_PARAMS.observedTag,
   });
   const composedInstruction = `${developerPrompt}\n\n${generatedInstruction}`;
 
@@ -757,11 +788,15 @@ describe("developer prompt composition", () => {
 });
 
 describe("judge instruction text", () => {
-  it("requests the five-field YES/NO letter-grade shape with no numeric grade cap", () => {
-    const instruction = buildJudgeInstruction({ turnIndex: 4, expectedTagIndex: 4 });
+  it("requests the five-field YES/NO letter-grade shape with tag evidence semantics", () => {
+    const instruction = buildJudgeInstruction({
+      turnIndex: 4,
+      expectedTagIndex: 4,
+      observedTag: "<!-- TURN_END:4 -->",
+    });
 
     expect(instruction).toBe(
-      'Evaluate the candidate deliverable for the declared turn. Expected turn index: 4. Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.',
+      'Evaluate the candidate deliverable for the declared turn. Expected turn index: 4. The turn-end marker observed on this candidate was: <!-- TURN_END:4 --> Report "tag_matches_expected_step" as true only if that quoted marker is exactly <!-- TURN_END:4 -->. Reply with a single JSON object containing exactly these five fields: "verdict" ("YES" or "NO"), "grade" ("A", "B", "C", "D", or "F"), "comment" (non-empty string), "tag_matches_expected_step" (boolean), "file_visibility" (boolean). Do not include any other fields, prose, or markdown fences.',
     );
     for (const fieldName of JUDGE_OUTPUT_FIELD_NAMES) {
       expect(instruction).toContain(`"${fieldName}"`);
@@ -774,8 +809,32 @@ describe("judge instruction text", () => {
     expect(instruction).not.toContain("FAIL");
   });
 
+  it("quotes the verbatim observed marker instead of reconstructing it", () => {
+    const instruction = buildJudgeInstruction({
+      turnIndex: 7,
+      expectedTagIndex: 7,
+      observedTag: "<!--TURN_END : 7-->",
+    });
+
+    expect(instruction).toContain("observed on this candidate was: <!--TURN_END : 7-->");
+    expect(instruction).toContain("exactly <!-- TURN_END:7 -->");
+  });
+
+  it("directs a false tag verdict when no marker was recorded", () => {
+    const instruction = buildJudgeInstruction({
+      turnIndex: 7,
+      expectedTagIndex: 7,
+      observedTag: null,
+    });
+
+    expect(instruction).toContain("No turn-end marker was recorded for this candidate");
+    expect(instruction).toContain('report "tag_matches_expected_step" as false');
+  });
+
   it("embeds the generated instruction verbatim in the built request", () => {
-    const built = expectBuilt(build(openAiJudge(), { turnIndex: 4 }));
+    const built = expectBuilt(
+      build(openAiJudge(), { turnIndex: 4, observedTag: "<!-- TURN_END:4 -->" }),
+    );
 
     const request = JSON.parse(built.requestBody) as {
       readonly input: readonly {
@@ -788,7 +847,7 @@ describe("judge instruction text", () => {
     );
     expect(developerMessage).toBeDefined();
     expect(developerMessage?.content?.[0]?.text).toBe(
-      buildJudgeInstruction({ turnIndex: 4, expectedTagIndex: 4 }),
+      buildJudgeInstruction({ turnIndex: 4, expectedTagIndex: 4, observedTag: "<!-- TURN_END:4 -->" }),
     );
   });
 });

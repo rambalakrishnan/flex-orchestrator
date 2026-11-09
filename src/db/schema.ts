@@ -17,7 +17,7 @@ import {
 import { ArtifactGuardError } from "../lib/guards.ts";
 
 /** Current schema version for `JobDO`, `RouterDO`, and `RegistryDO`. */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 // ============================================================================
 // Minimal Structural SQL Interfaces (Compatible with Cloudflare SqlStorage)
@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS turn_candidates (
     )
   ),
   parsed_tag_index INTEGER,
+  raw_tag TEXT,
   deliverable_blob BLOB CHECK (deliverable_blob IS NULL OR length(deliverable_blob) <= ${ARTIFACT_ROW_GUARD_BYTES}),
   deliverable_bytes INTEGER NOT NULL CHECK (
     deliverable_bytes >= 0 AND
@@ -859,6 +860,7 @@ export interface TurnCandidateSummaryRow extends Record<string, SqlPrimitiveValu
   attempt_id: string;
   structural_status: CandidateStructuralStatus;
   parsed_tag_index: number | null;
+  raw_tag: string | null;
   deliverable_bytes: number;
   row_bytes: number;
   accepted: number;
@@ -1056,7 +1058,7 @@ export const TURNS_SUMMARY_COLUMNS =
   "turn_index, status, prompt_bytes, row_bytes, pinned_in_replay, attachment_file_ids_json, accepted_candidate_id, accepted_attempt_id, accepted_response_id, accepted_with_warning, marginal_input_tokens, created_at, updated_at";
 
 export const TURN_CANDIDATES_SUMMARY_COLUMNS =
-  "candidate_id, turn_index, attempt_id, structural_status, parsed_tag_index, deliverable_bytes, row_bytes, accepted, warning_json, created_at";
+  "candidate_id, turn_index, attempt_id, structural_status, parsed_tag_index, raw_tag, deliverable_bytes, row_bytes, accepted, warning_json, created_at";
 
 export const GENERATION_ATTEMPTS_SUMMARY_COLUMNS =
   "attempt_id, turn_index, attempt_number, continuation_index, kind, status, idempotency_key, provider_response_id, parent_response_id, capacity_sends, next_backoff_at_ms, poll_probes, next_poll_at_ms, request_bytes, row_bytes, usage_json, diagnostics_json, created_at, updated_at";
@@ -1133,6 +1135,14 @@ export const JOB_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
     ],
     skipIfPresent: (sql) => hasTableColumn(sql, "turns", "pinned_in_replay"),
   },
+  {
+    // Verbatim turn-end marker for judge tag evidence. ADD COLUMN is safe
+    // in place: existing rows keep NULL ("no observed marker"). Skipped on
+    // fresh databases where the v1 DDL already declares the column.
+    version: 4,
+    statements: ["ALTER TABLE turn_candidates ADD COLUMN raw_tag TEXT;"],
+    skipIfPresent: (sql) => hasTableColumn(sql, "turn_candidates", "raw_tag"),
+  },
 ];
 export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
   {
@@ -1149,6 +1159,11 @@ export const ROUTER_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
   {
     // Alignment-only step; see the v2 comment above.
     version: 3,
+    statements: [],
+  },
+  {
+    // Alignment-only step; RouterDO carries no turn_candidates table.
+    version: 4,
     statements: [],
   },
 ];
@@ -1177,6 +1192,11 @@ export const REGISTRY_DO_MIGRATIONS: readonly SchemaMigrationStep[] = [
   {
     // RegistryDO carries no turns table; alignment-only step.
     version: 3,
+    statements: [],
+  },
+  {
+    // Alignment-only step; RegistryDO carries no turn_candidates table.
+    version: 4,
     statements: [],
   },
 ];

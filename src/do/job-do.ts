@@ -19,6 +19,7 @@ import {
   ROUTER_DO_NAME,
   getVerifiedGenerationModel,
 } from "../constants.ts";
+import { HttpError } from "../http.ts";
 import {
   getBranchLineage,
   getJob,
@@ -2120,10 +2121,10 @@ export class JobDO extends DurableObject<Env> {
 
   private validateCreateJobCommand(command: CreateJobCommand): void {
     if (typeof command.jobId !== "string" || command.jobId.trim().length === 0) {
-      throw new Error("CreateJobCommand.jobId must be a non-empty string");
+      throw new HttpError(400, "invalid_job_id", "CreateJobCommand.jobId must be a non-empty string");
     }
     if (typeof command.title !== "string") {
-      throw new Error("CreateJobCommand.title must be a string");
+      throw new HttpError(400, "invalid_title", "CreateJobCommand.title must be a string");
     }
     const initialPreviousResponseId = command.initialPreviousResponseId;
     if (
@@ -2131,7 +2132,9 @@ export class JobDO extends DurableObject<Env> {
       initialPreviousResponseId !== null &&
       typeof initialPreviousResponseId !== "string"
     ) {
-      throw new Error(
+      throw new HttpError(
+        400,
+        "invalid_previous_response_id",
         "CreateJobCommand.initialPreviousResponseId must be a string, null, or undefined"
       );
     }
@@ -2140,22 +2143,26 @@ export class JobDO extends DurableObject<Env> {
       initialPreviousResponseId.trim().length > 0
     ) {
       const trimmed = initialPreviousResponseId.trim();
-      if (trimmed.length > 512 || /[\u0000-\u0020\u007f]/.test(trimmed)) {
-        throw new Error(
-          "CreateJobCommand.initialPreviousResponseId must be at most 512 characters without whitespace or control characters"
+      if (trimmed.length > 512 || /[ -]/.test(trimmed)) {
+        throw new HttpError(
+          400,
+          "invalid_previous_response_id",
+          `CreateJobCommand.initialPreviousResponseId must be at most 512 characters without whitespace or control characters, got length ${trimmed.length}`
         );
       }
     }
     const config = command.config;
     const profile = getVerifiedGenerationModel(config.model);
     if (profile === undefined) {
-      throw new Error(`Unknown generation model: ${config.model}`);
+      throw new HttpError(400, "unknown_model", `Unknown generation model: ${config.model}`);
     }
     if (!isReasoningEffort(config.reasoningEffort)) {
-      throw new Error(`Unsupported reasoning effort: ${String(config.reasoningEffort)}`);
+      throw new HttpError(400, "unsupported_reasoning_effort", `Unsupported reasoning effort: ${String(config.reasoningEffort)}`);
     }
     if (!profile.supportedReasoningEfforts.includes(config.reasoningEffort)) {
-      throw new Error(
+      throw new HttpError(
+        400,
+        "unsupported_reasoning_effort",
         `Model ${profile.id} does not support reasoning effort ${config.reasoningEffort}; supported efforts: ${profile.supportedReasoningEfforts.join(", ")}`
       );
     }
@@ -2163,22 +2170,26 @@ export class JobDO extends DurableObject<Env> {
       !Number.isInteger(config.maxOutputTokens) ||
       config.maxOutputTokens <= 0
     ) {
-      throw new Error("CreateJobCommand.config.maxOutputTokens must be a positive integer");
+      throw new HttpError(400, "invalid_max_output_tokens", `CreateJobCommand.config.maxOutputTokens must be a positive integer, got ${String(config.maxOutputTokens)}`);
     }
     if (config.maxOutputTokens > profile.maxOutputTokens) {
-      throw new Error(
+      throw new HttpError(
+        400,
+        "invalid_max_output_tokens",
         `CreateJobCommand.config.maxOutputTokens ${config.maxOutputTokens} exceeds the ${profile.id} limit of ${profile.maxOutputTokens}`
       );
     }
     if (typeof config.developerPrompt !== "string") {
-      throw new Error("CreateJobCommand.config.developerPrompt must be a string");
+      throw new HttpError(400, "invalid_developer_prompt", "CreateJobCommand.config.developerPrompt must be a string");
     }
     if (!Array.isArray(config.developerFileIds)) {
-      throw new Error("CreateJobCommand.config.developerFileIds must be an array");
+      throw new HttpError(400, "invalid_developer_file_ids", "CreateJobCommand.config.developerFileIds must be an array");
     }
     for (const fileId of config.developerFileIds) {
       if (typeof fileId !== "string" || fileId.length === 0) {
-        throw new Error(
+        throw new HttpError(
+          400,
+          "invalid_developer_file_ids",
           "CreateJobCommand.config.developerFileIds must contain only non-empty strings"
         );
       }
@@ -2188,38 +2199,44 @@ export class JobDO extends DurableObject<Env> {
       config.cacheTtl !== "12h" &&
       config.cacheTtl !== "nocache"
     ) {
-      throw new Error(`Unsupported cache TTL: ${String(config.cacheTtl)}`);
+      throw new HttpError(400, "unsupported_cache_ttl", `Unsupported cache TTL: ${String(config.cacheTtl)}`);
     }
     if (typeof config.webSearch !== "boolean") {
-      throw new Error("CreateJobCommand.config.webSearch must be boolean");
+      throw new HttpError(400, "invalid_web_search", "CreateJobCommand.config.webSearch must be boolean");
     }
     if (config.maxContinuations !== MAX_AUTO_CONTINUATIONS_PER_TURN) {
-      throw new Error(
-        `Automatic continuation budget is fixed at ${MAX_AUTO_CONTINUATIONS_PER_TURN} per job`
+      throw new HttpError(
+        400,
+        "invalid_max_continuations",
+        `Automatic continuation budget is fixed at ${MAX_AUTO_CONTINUATIONS_PER_TURN} per job, got ${String(config.maxContinuations)}`
       );
     }
     if (config.maxAutoRetries !== MAX_AUTO_FULL_RETRIES) {
-      throw new Error(
-        `Automatic full retry budget is fixed at ${MAX_AUTO_FULL_RETRIES} per job`
+      throw new HttpError(
+        400,
+        "invalid_max_auto_retries",
+        `Automatic full retry budget is fixed at ${MAX_AUTO_FULL_RETRIES} per job, got ${String(config.maxAutoRetries)}`
       );
     }
     if (!Array.isArray(command.initialTurns)) {
-      throw new Error("CreateJobCommand.initialTurns must be an array");
+      throw new HttpError(400, "invalid_initial_turns", "CreateJobCommand.initialTurns must be an array");
     }
     command.initialTurns.forEach((turn: CreateJobCommand["initialTurns"][number], index) => {
       if (turn.turnIndex !== index + 1) {
-        throw new Error(
+        throw new HttpError(
+          400,
+          "invalid_initial_turns",
           `CreateJobCommand initial turns must be sequential 1-based; expected ${index + 1}, got ${turn.turnIndex}`
         );
       }
       if (typeof turn.promptText !== "string") {
-        throw new Error(`Initial turn ${turn.turnIndex} promptText must be a string`);
+        throw new HttpError(400, "invalid_initial_turns", `Initial turn ${turn.turnIndex} promptText must be a string`);
       }
       if (!Array.isArray(turn.attachmentFileIds)) {
-        throw new Error(`Initial turn ${turn.turnIndex} attachmentFileIds must be an array`);
+        throw new HttpError(400, "invalid_initial_turns", `Initial turn ${turn.turnIndex} attachmentFileIds must be an array`);
       }
       if (turn.pinnedInReplay !== undefined && typeof turn.pinnedInReplay !== "boolean") {
-        throw new Error(`Initial turn ${turn.turnIndex} pinnedInReplay must be a boolean`);
+        throw new HttpError(400, "invalid_initial_turns", `Initial turn ${turn.turnIndex} pinnedInReplay must be a boolean`);
       }
     });
   }

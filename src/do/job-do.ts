@@ -273,6 +273,7 @@ interface JudgeDiagnostics {
   readonly unknown_message: string | null;
   readonly advisory_warnings: readonly string[];
   readonly started_at_ms: number | null;
+  readonly sent_header_names?: readonly string[];
 }
 
 interface PreparedAttempt {
@@ -388,6 +389,31 @@ function isStructuralKind(value: unknown): value is StructuralClassification["ki
   );
 }
 
+const JUDGE_HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_JUDGE_HEADERS = 8;
+const MAX_JUDGE_HEADER_VALUE_LENGTH = 512;
+
+function parseJudgeConfigHeaders(raw: unknown): Record<string, string> {
+  if (!isRecord(raw)) {
+    throw new Error("jobs.judge_config_json headers must be a string-to-string record");
+  }
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_JUDGE_HEADERS) {
+    throw new Error("jobs.judge_config_json headers must contain at most 8 entries");
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, value] of entries) {
+    if (!JUDGE_HEADER_NAME_RE.test(name)) {
+      throw new Error("jobs.judge_config_json headers contains an invalid header name");
+    }
+    if (typeof value !== "string" || value.length === 0 || value.length > MAX_JUDGE_HEADER_VALUE_LENGTH) {
+      throw new Error("jobs.judge_config_json headers values must be non-empty strings of at most 512 chars");
+    }
+    headers[name] = value;
+  }
+  return headers;
+}
+
 function parseJudgeConfig(raw: string): JudgeConfig {
   const parsed = tryParseJson(raw);
   if (!isRecord(parsed)) {
@@ -421,6 +447,10 @@ function parseJudgeConfig(raw: string): JudgeConfig {
   ) {
     throw new Error("jobs.judge_config_json does not match the declared judge contract");
   }
+  let headers: Record<string, string> | undefined;
+  if (parsed.headers !== undefined) {
+    headers = parseJudgeConfigHeaders(parsed.headers);
+  }
   return {
     enabled: true,
     provider: parsed.provider,
@@ -436,6 +466,7 @@ function parseJudgeConfig(raw: string): JudgeConfig {
       typeof parsed.injectOnFail === "boolean" ? parsed.injectOnFail : true,
     injectOnPass:
       typeof parsed.injectOnPass === "boolean" ? parsed.injectOnPass : false,
+    ...(headers !== undefined ? { headers } : {}),
     developerPrompt:
       typeof parsed.developerPrompt === "string" ? parsed.developerPrompt : "",
   };
@@ -585,6 +616,14 @@ function parseJudgeDiagnostics(raw: string, provider: string): JudgeDiagnostics 
       }
     }
   }
+  const sentHeaderNames: string[] = [];
+  if (Array.isArray(parsed.sent_header_names)) {
+    for (const name of parsed.sent_header_names) {
+      if (typeof name === "string" && name.length > 0) {
+        sentHeaderNames.push(name);
+      }
+    }
+  }
   return {
     provider: typeof parsed.provider === "string" ? parsed.provider : provider,
     response_bytes:
@@ -596,6 +635,7 @@ function parseJudgeDiagnostics(raw: string, provider: string): JudgeDiagnostics 
     advisory_warnings: advisoryWarnings,
     started_at_ms:
       typeof parsed.started_at_ms === "number" ? parsed.started_at_ms : null,
+    ...(sentHeaderNames.length > 0 ? { sent_header_names: sentHeaderNames } : {}),
   };
 }
 
@@ -3796,6 +3836,11 @@ export class JobDO extends DurableObject<Env> {
     }
 
     const nowIso = toIso(now());
+    // Static judge headers ride the HTTP POST only: buildJudgeRequest shapes
+    // requestBody/requestBytes alone, so stored bodies stay byte-identical
+    // with or without headers. Only sorted header NAMES (never values) are
+    // recorded in diagnostics for auditability.
+    const sentHeaderNames = Object.keys(config.headers ?? {}).sort();
     this.storage.transactionSync(() => {
       insertJudgeCall(this.sql, {
         judgeCallId,
@@ -3814,6 +3859,7 @@ export class JobDO extends DurableObject<Env> {
           ...emptyJudgeDiagnostics(config.provider),
           advisory_warnings: built.request.advisoryWarnings,
           started_at_ms: now(),
+          ...(sentHeaderNames.length > 0 ? { sent_header_names: sentHeaderNames } : {}),
         }),
         nowIso,
       });
@@ -3867,6 +3913,7 @@ export class JobDO extends DurableObject<Env> {
           apiRoot: config.apiRoot,
           requestBytes: built.request.requestBytes,
           idempotencyKey: built.request.idempotencyKey,
+          ...(config.headers !== undefined ? { extraHeaders: config.headers } : {}),
         });
         if (completed.kind !== "completed") {
           outcome = {
@@ -3911,6 +3958,7 @@ export class JobDO extends DurableObject<Env> {
           apiRoot: config.apiRoot,
           requestBytes: built.request.requestBytes,
           idempotencyKey: built.request.idempotencyKey,
+          ...(config.headers !== undefined ? { extraHeaders: config.headers } : {}),
         });
         if (dispatched.kind !== "dispatched") {
           outcome = {
@@ -5043,11 +5091,13 @@ export class JobDO extends DurableObject<Env> {
         if (requestBytes === null) {
           throw new Error("Judge request artifact is missing");
         }
+        const extraHeaders = config.enabled ? config.headers : undefined;
         const completed = await dispatchChatCompletionsCreate({
           apiKey,
           apiRoot: config.enabled ? config.apiRoot : undefined,
           requestBytes,
           idempotencyKey: `${job.job_id}:j${call.turn_index}:${judgeCallId}`,
+          ...(extraHeaders !== undefined ? { extraHeaders } : {}),
         });
         if (completed.kind !== "completed") {
           outcome = {

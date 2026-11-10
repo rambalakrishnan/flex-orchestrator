@@ -204,11 +204,38 @@ function classifyCatchReason(err: unknown): "timeout" | "network_error" {
   return "network_error";
 }
 
+/**
+ * Merges validated static headers into dispatch POSTs after defaults. Custom
+ * names only — overriding Authorization/Content-Type/Accept/Idempotency-Key
+ * throws (case-insensitive) so the dispatch seam stays credential-safe.
+ */
+function mergeDispatchHeaders(
+  base: Record<string, string>,
+  extra: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  if (extra === undefined) {
+    return base;
+  }
+  const reserved: Record<string, true> = {
+    authorization: true,
+    "content-type": true,
+    accept: true,
+    "idempotency-key": true,
+  };
+  for (const name of Object.keys(extra)) {
+    if (reserved[name.toLowerCase()] === true) {
+      throw new Error(`extraHeaders must not override reserved header "${name}"`);
+    }
+  }
+  return { ...base, ...extra };
+}
+
 export interface DispatchResponsesCreateParams {
   readonly apiKey: string;
   readonly apiRoot?: string;
   readonly requestBytes: Uint8Array | ArrayBuffer;
   readonly idempotencyKey: IdempotencyKey;
+  readonly extraHeaders?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly fetchImpl?: typeof fetch;
@@ -231,12 +258,15 @@ export async function dispatchResponsesCreate(
       url,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${params.apiKey}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Idempotency-Key": params.idempotencyKey,
-        },
+        headers: mergeDispatchHeaders(
+          {
+            Authorization: `Bearer ${params.apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "Idempotency-Key": params.idempotencyKey,
+          },
+          params.extraHeaders,
+        ),
         body: bodyBuffer,
       },
       params,
@@ -934,6 +964,7 @@ export interface DispatchChatCompletionsCreateParams {
   readonly apiRoot?: string;
   readonly requestBytes: Uint8Array | ArrayBuffer;
   readonly idempotencyKey: IdempotencyKey;
+  readonly extraHeaders?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly fetchImpl?: typeof fetch;
@@ -1018,12 +1049,15 @@ export async function dispatchChatCompletionsCreate(
       url,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${params.apiKey}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Idempotency-Key": params.idempotencyKey,
-        },
+        headers: mergeDispatchHeaders(
+          {
+            Authorization: `Bearer ${params.apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "Idempotency-Key": params.idempotencyKey,
+          },
+          params.extraHeaders,
+        ),
         body: bodyBuffer,
       },
       params,

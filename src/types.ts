@@ -131,10 +131,18 @@ export type JudgeConfig =
        */
       readonly injectOnPass: boolean;
       /**
+       * Static extra headers merged into judge POSTs (provider-generic; e.g.
+       * routing/session headers required by some gateways). Never stored in
+       * the request body — bodies stay byte-identical with or without headers.
+       * Names allowlisted to RFC 9110 token chars, values non-empty ≤512
+       * chars, max 8 entries (enforced in validation).
+       */
+      readonly headers?: Record<string, string>;
+      /**
        * Developer context delivered to the judge as a developer-role message.
        * Judge developer files are attached to that same developer message on every judge call.
        */
-      readonly developerPrompt: string;
+       readonly developerPrompt: string;
     };
 
 export type JudgeVerdict = "PASS" | "FAIL";

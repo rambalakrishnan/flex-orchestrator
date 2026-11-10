@@ -172,6 +172,7 @@ const createCommand = {
       maxGradeThreshold: 50,
       injectOnFail: true,
       injectOnPass: false,
+      headers: { "x-opencode-session": runTag },
       developerPrompt: "",
     },
   },

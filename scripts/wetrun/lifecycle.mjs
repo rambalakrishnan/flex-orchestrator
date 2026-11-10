@@ -157,8 +157,8 @@ const createCommand = {
     developerPrompt:
       "You are a terse test assistant. Follow the turn prompt exactly, especially the marker protocol.",
     developerFileIds: [],
-    maxContinuations: 1,
-    maxAutoRetries: 0,
+    maxContinuations: 3,
+    maxAutoRetries: 1,
     judge: {
       enabled: true,
       provider: JUDGE_PROVIDER,

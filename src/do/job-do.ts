@@ -108,6 +108,8 @@ import {
   cancelProviderResponse,
   dispatchChatCompletionsCreate,
   dispatchResponsesCreate,
+  extractResponsesOutputAndRefusal,
+  extractTokenUsage,
   resolveEnvSecret,
   retrieveProviderResponse,
 } from "../lib/openai.ts";
@@ -4000,32 +4002,57 @@ export class JobDO extends DurableObject<Env> {
             }
           });
           await this.publishJobIndex(requireJob(this.sql, job.job_id));
-          const retrieval = await retrieveProviderResponse({
-            apiKey,
-            apiRoot: config.apiRoot,
-            responseId: dispatched.responseId,
-          });
-          if (retrieval.kind === "still_running") {
+          let posted: Record<string, unknown> | null = null;
+          try {
+            const rawText = utf8Decoder.decode(dispatched.rawResponseBytes);
+            const parsed: unknown = rawText.trim().length > 0 ? JSON.parse(rawText) : null;
+            posted = isRecord(parsed) ? parsed : null;
+          } catch {
+            posted = null;
+          }
+          if (posted === null) {
             outcome = {
               kind: "unknown",
               judgeCallId,
               reason: "provider_error",
-              message: "Judge response had not settled when retrieved",
+              message: "Judge provider response was not valid JSON",
               advisoryWarnings: built.request.advisoryWarnings,
             };
           } else {
-            const parse = parseJudgeOutput(retrieval.outputText ?? "");
-            outcome = classifyJudgeEvaluation({
-              judgeCallId,
-              parse,
-              manifest: built.request.manifest,
-              responseId: dispatched.responseId,
-              usage: retrieval.usage,
-              providerErrorMessage:
-                retrieval.status === "failed"
-                  ? (retrieval.errorMessage ?? "Judge provider response failed")
-                  : null,
-            });
+            const rawStatus = typeof posted.status === "string" ? posted.status : "completed";
+            if (rawStatus === "queued" || rawStatus === "in_progress") {
+              outcome = {
+                kind: "unknown",
+                judgeCallId,
+                reason: "provider_error",
+                message: "Judge response had not settled when retrieved",
+                advisoryWarnings: built.request.advisoryWarnings,
+              };
+            } else {
+              const settledStatus: "completed" | "incomplete" | "failed" | "cancelled" =
+                rawStatus === "incomplete" || rawStatus === "failed" || rawStatus === "cancelled"
+                  ? rawStatus
+                  : "completed";
+              const { outputText } = extractResponsesOutputAndRefusal(posted);
+              const usage = extractTokenUsage(posted);
+              const errorRecord = posted.error;
+              const errorMessage =
+                isRecord(errorRecord) && typeof errorRecord.message === "string"
+                  ? errorRecord.message
+                  : null;
+              const parse = parseJudgeOutput(outputText ?? "");
+              outcome = classifyJudgeEvaluation({
+                judgeCallId,
+                parse,
+                manifest: built.request.manifest,
+                responseId: dispatched.responseId,
+                usage,
+                providerErrorMessage:
+                  settledStatus === "failed"
+                    ? (errorMessage ?? "Judge provider response failed")
+                    : null,
+              });
+            }
           }
         }
       } catch (error) {

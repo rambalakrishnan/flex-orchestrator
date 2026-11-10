@@ -385,7 +385,7 @@ export async function dispatchResponsesCreate(
   };
 }
 
-function extractResponsesOutputAndRefusal(payload: Record<string, unknown>): {
+export function extractResponsesOutputAndRefusal(payload: Record<string, unknown>): {
   readonly outputText: string | null;
   readonly refusalText: string | null;
 } {
@@ -454,7 +454,7 @@ function extractResponsesOutputAndRefusal(payload: Record<string, unknown>): {
   };
 }
 
-function extractTokenUsage(payload: Record<string, unknown>): TokenUsageRecord | null {
+export function extractTokenUsage(payload: Record<string, unknown>): TokenUsageRecord | null {
   if (!isPlainRecord(payload.usage)) {
     return null;
   }

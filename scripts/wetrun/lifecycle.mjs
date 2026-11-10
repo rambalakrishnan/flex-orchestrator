@@ -36,9 +36,10 @@ const SERVICE_SECRET = process.env.OMP_SERVICE_TOKEN_SECRET;
 const JUDGE_SECRET_NAME = process.env.JUDGE_SECRET_NAME;
 
 const GENERATION_MODEL = "gpt-6-luna";
-const JUDGE_PROVIDER = "opencode";
-const JUDGE_API_ROOT = "https://opencode.ai/inference/go/openai/v1";
-const JUDGE_MODEL = "muse-spark-1.3-contributor";
+const JUDGE_PROVIDER = process.env.JUDGE_PROVIDER ?? "opencode";
+const JUDGE_API_ROOT = process.env.JUDGE_API_ROOT ?? "https://opencode.ai/inference/go/openai/v1";
+const JUDGE_MODEL = process.env.JUDGE_MODEL ?? "muse-spark-1.3-contributor";
+const JUDGE_HEADERS_JSON = process.env.JUDGE_HEADERS_JSON ?? "";
 
 const POLL_INTERVAL_MS = 30_000;
 const POLL_BUDGET_MS = 15 * 60 * 1000;
@@ -172,7 +173,9 @@ const createCommand = {
       maxGradeThreshold: 50,
       injectOnFail: true,
       injectOnPass: false,
-      headers: { "x-opencode-session": runTag },
+      ...(JUDGE_HEADERS_JSON.length > 0
+        ? { headers: JSON.parse(JUDGE_HEADERS_JSON.replaceAll("RUNTAG", runTag)) }
+        : {}),
       developerPrompt: "",
     },
   },
